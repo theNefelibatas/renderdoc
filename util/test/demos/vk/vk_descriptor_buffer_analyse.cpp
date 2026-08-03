@@ -1753,7 +1753,7 @@ RD_TEST(VK_Descriptor_Buffer_Analyse, VulkanGraphicsTest)
 
         VkDeviceSize alignStep = texelAlign;
 
-        // If the single texel alignment property is VK_TRUE, then the buffer view’s offset must be
+        // If the single texel alignment property is VK_TRUE, then the buffer view's offset must be
         // aligned to the lesser of the corresponding byte alignment value or the size of a single
         // texel, based on VkBufferViewCreateInfo::format
         if(texelAlignProps.uniformTexelBufferOffsetSingleTexelAlignment)
@@ -1889,7 +1889,7 @@ RD_TEST(VK_Descriptor_Buffer_Analyse, VulkanGraphicsTest)
 
         VkDeviceSize alignStep = texelAlign;
 
-        // If the single texel alignment property is VK_TRUE, then the buffer view’s offset must be
+        // If the single texel alignment property is VK_TRUE, then the buffer view's offset must be
         // aligned to the lesser of the corresponding byte alignment value or the size of a single
         // texel, based on VkBufferViewCreateInfo::format
         if(texelAlignProps.storageTexelBufferOffsetSingleTexelAlignment)
