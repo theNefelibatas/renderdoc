@@ -487,12 +487,12 @@ void CaptureDialog::vulkanLayerWarn_mouseClick()
 
       if(admin)
       {
-// linux sometimes can't run GUI apps as root, so we have to run renderdoccmd. Check that it's
+// linux sometimes can't run GUI apps as root, so we have to run renderdevcmd. Check that it's
 // installed, error if not, then invoke it.
 #if defined(Q_OS_LINUX) || defined(Q_OS_FREEBSD)
         QDir binDir = QFileInfo(qApp->applicationFilePath()).absoluteDir();
 
-        QString cmd = lit("renderdoccmd");
+        QString cmd = lit("renderdevcmd");
 
         if(binDir.exists(cmd))
         {
@@ -506,10 +506,10 @@ void CaptureDialog::vulkanLayerWarn_mouseClick()
           if(inPath.isEmpty())
           {
             RDDialog::critical(
-                this, tr("Can't locate renderdoccmd"),
-                tr("On linux we must run renderdoccmd as root to register the layer, because "
-                   "graphical applications like qrenderdoc may fail to launch.\n\n"
-                   "renderdoccmd could not be located either next to this qrenderdoc executable or "
+                this, tr("Can't locate renderdevcmd"),
+                tr("On linux we must run renderdevcmd as root to register the layer, because "
+                   "graphical applications like qrenderdev may fail to launch.\n\n"
+                   "renderdevcmd could not be located either next to this qrenderdev executable or "
                    "in PATH."));
             return;
           }
