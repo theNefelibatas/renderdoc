@@ -80,6 +80,10 @@
       <WarningLevel>Level4</WarningLevel>
       <TreatWarningAsError>true</TreatWarningAsError>
       <DisableSpecificWarnings>4100;4054;4055</DisableSpecificWarnings>
+      <!-- Force UTF-8 source charset so µ etc. in fmt's headers are representable on
+           non-UTF-8 system code pages (e.g. CP936/GBK on Chinese Windows). Without this,
+           C4566 fires and, since TreatWarningAsError is on, breaks the build. -->
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
       <SubSystem>Console</SubSystem>
