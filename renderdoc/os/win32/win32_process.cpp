@@ -133,7 +133,7 @@ static void ApplyEnvModifications(EnvMap &envValues,
 }
 
 // on windows we apply environment changes here, after process initialisation
-// but before any real work (in RenderDoc::Initialise) so that we support
+// but before any real work (in RenderDev::Initialise) so that we support
 // injecting the dll into processes we didn't launch (ie didn't control the
 // starting environment for), or even the application loading the dll itself
 // without any interaction with our replay app.
@@ -195,24 +195,24 @@ uint64_t Process::GetMemoryUsage()
 extern "C" __declspec(dllexport) void __cdecl INTERNAL_GetTargetControlIdent(uint32_t *ident)
 {
   if(ident)
-    *ident = RenderDoc::Inst().GetTargetControlIdent();
+    *ident = RenderDev::Inst().GetTargetControlIdent();
 }
 
 extern "C" __declspec(dllexport) void __cdecl INTERNAL_SetCaptureOptions(CaptureOptions *opts)
 {
   if(opts)
-    RenderDoc::Inst().SetCaptureOptions(*opts);
+    RenderDev::Inst().SetCaptureOptions(*opts);
 }
 
 extern "C" __declspec(dllexport) void __cdecl INTERNAL_SetCaptureFile(const char *capfile)
 {
   if(capfile)
-    RenderDoc::Inst().SetCaptureFileTemplate(capfile);
+    RenderDev::Inst().SetCaptureFileTemplate(capfile);
 }
 
 extern "C" __declspec(dllexport) void __cdecl INTERNAL_SetDebugLogFile(const char *logfile)
 {
-  RENDERDOC_SetDebugLogFile(logfile ? logfile : rdcstr());
+  RENDERDEV_SetDebugLogFile(logfile ? logfile : rdcstr());
 }
 
 static EnvironmentModification tempEnvMod;
@@ -398,7 +398,7 @@ uintptr_t FindRemoteDLL(DWORD pid, rdcstr libName)
   return ret;
 }
 
-void InjectFunctionCall(HANDLE hProcess, uintptr_t renderdoc_remote, const char *funcName,
+void InjectFunctionCall(HANDLE hProcess, uintptr_t renderdev_remote, const char *funcName,
                         void *data, const size_t dataLen)
 {
   if(dataLen == 0)
@@ -409,14 +409,14 @@ void InjectFunctionCall(HANDLE hProcess, uintptr_t renderdoc_remote, const char 
 
   RDCDEBUG("Injecting call to %s", funcName);
 
-  HMODULE renderdoc_local = GetModuleHandleA(STRINGIZE(RDOC_BASE_NAME) ".dll");
+  HMODULE renderdev_local = GetModuleHandleA(STRINGIZE(RDOC_BASE_NAME) ".dll");
 
-  uintptr_t func_local = (uintptr_t)GetProcAddress(renderdoc_local, funcName);
+  uintptr_t func_local = (uintptr_t)GetProcAddress(renderdev_local, funcName);
 
   // we've found SetCaptureOptions in our local instance of the module, now calculate the offset and
   // so get the function
   // in the remote module (which might be loaded at a different base address
-  uintptr_t func_remote = func_local + renderdoc_remote - (uintptr_t)renderdoc_local;
+  uintptr_t func_remote = func_local + renderdev_remote - (uintptr_t)renderdev_local;
 
   void *remoteMem = VirtualAllocEx(hProcess, NULL, dataLen, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
   SIZE_T numWritten;
@@ -607,23 +607,23 @@ rdcpair<RDResult, uint32_t> Process::InjectIntoProcess(uint32_t pid,
       RDCDEBUG("Timed out waiting for debugger, gave up after %u s", opts.delayForDebugger);
   }
 
-  RDCLOG("Injecting renderdoc into process %lu", pid);
+  RDCLOG("Injecting renderdev into process %lu", pid);
 
-  wchar_t renderdocPath[MAX_PATH] = {0};
-  GetModuleFileNameW(GetModuleHandleA(STRINGIZE(RDOC_BASE_NAME) ".dll"), &renderdocPath[0],
+  wchar_t renderdevPath[MAX_PATH] = {0};
+  GetModuleFileNameW(GetModuleHandleA(STRINGIZE(RDOC_BASE_NAME) ".dll"), &renderdevPath[0],
                                       MAX_PATH - 1);
 
-  wchar_t renderdocPathLower[MAX_PATH] = {0};
-  memcpy(renderdocPathLower, renderdocPath, MAX_PATH * sizeof(wchar_t));
-  for(size_t i = 0; i < MAX_PATH && renderdocPathLower[i]; i++)
+  wchar_t renderdevPathLower[MAX_PATH] = {0};
+  memcpy(renderdevPathLower, renderdevPath, MAX_PATH * sizeof(wchar_t));
+  for(size_t i = 0; i < MAX_PATH && renderdevPathLower[i]; i++)
   {
     // lowercase
-    if(renderdocPathLower[i] >= 'A' && renderdocPathLower[i] <= 'Z')
-      renderdocPathLower[i] = 'a' + char(renderdocPathLower[i] - 'A');
+    if(renderdevPathLower[i] >= 'A' && renderdevPathLower[i] <= 'Z')
+      renderdevPathLower[i] = 'a' + char(renderdevPathLower[i] - 'A');
 
     // normalise paths
-    if(renderdocPathLower[i] == '/')
-      renderdocPathLower[i] = '\\';
+    if(renderdevPathLower[i] == '/')
+      renderdevPathLower[i] = '\\';
   }
 
   BOOL isWow64 = FALSE;
@@ -669,15 +669,15 @@ rdcpair<RDResult, uint32_t> Process::InjectIntoProcess(uint32_t pid,
   // We don't support capturing 64-bit programs from a 32-bit install
   // because it's pointless - a 64-bit install will work for all in
   // that case. But we do want to handle the case of:
-  // 64-bit renderdoc -> 32-bit program (via 32-bit renderdoccmd)
-  //    -> 64-bit program (going back to 64-bit renderdoccmd).
-  // so we try to see if we're an x86 invoked renderdoccmd in an
+  // 64-bit renderdev -> 32-bit program (via 32-bit renderdevcmd)
+  //    -> 64-bit program (going back to 64-bit renderdevcmd).
+  // so we try to see if we're an x86 invoked renderdevcmd in an
   // otherwise 64-bit install, and 'promote' back to 64-bit.
   if(selfWow64 && !isWow64)
   {
-    wchar_t *slash = wcsrchr(renderdocPath, L'\\');
+    wchar_t *slash = wcsrchr(renderdevPath, L'\\');
 
-    if(slash && slash > renderdocPath + 4)
+    if(slash && slash > renderdevPath + 4)
     {
       slash -= 4;
 
@@ -692,9 +692,9 @@ rdcpair<RDResult, uint32_t> Process::InjectIntoProcess(uint32_t pid,
     // corresponding folder
     if(!capalt)
     {
-      const wchar_t *devLocation = wcsstr(renderdocPathLower, L"\\win32\\development\\");
+      const wchar_t *devLocation = wcsstr(renderdevPathLower, L"\\win32\\development\\");
       if(!devLocation)
-        devLocation = wcsstr(renderdocPathLower, L"\\win32\\release\\");
+        devLocation = wcsstr(renderdevPathLower, L"\\win32\\release\\");
 
       if(devLocation)
       {
@@ -706,18 +706,18 @@ rdcpair<RDResult, uint32_t> Process::InjectIntoProcess(uint32_t pid,
     // if we couldn't promote, then bail out.
     if(!capalt)
     {
-      RDCDEBUG("Running from %ls", renderdocPathLower);
+      RDCDEBUG("Running from %ls", renderdevPathLower);
 
       CloseHandle(hProcess);
       RDResult result;
       SET_ERROR_RESULT(result, ResultCode::IncompatibleProcess,
-                       "Can't capture 64-bit program with 32-bit build of RenderDoc. Please run a "
-                       "64-bit build of RenderDoc");
+                       "Can't capture 64-bit program with 32-bit build of RenderDev. Please run a "
+                       "64-bit build of RenderDev");
       return {result, 0};
     }
   }
 #else
-  // farm off to alternate bitness renderdoccmd.exe
+  // farm off to alternate bitness renderdevcmd.exe
 
   // if the target process is 'wow64' that means it's 32-bit.
   capalt = (isWow64 == TRUE);
@@ -728,27 +728,27 @@ rdcpair<RDResult, uint32_t> Process::InjectIntoProcess(uint32_t pid,
 #if ENABLED(RDOC_X64)
     // if it looks like we're in the development environment, look for the alternate bitness in the
     // corresponding folder
-    const wchar_t *devLocation = wcsstr(renderdocPathLower, L"\\x64\\development\\");
+    const wchar_t *devLocation = wcsstr(renderdevPathLower, L"\\x64\\development\\");
     if(devLocation)
     {
-      size_t idx = devLocation - renderdocPathLower;
+      size_t idx = devLocation - renderdevPathLower;
 
-      renderdocPath[idx] = 0;
+      renderdevPath[idx] = 0;
 
-      wcscat_s(renderdocPath, L"\\Win32\\Development\\renderdoccmd.exe");
+      wcscat_s(renderdevPath, L"\\Win32\\Development\\renderdevcmd.exe");
     }
 
     if(!devLocation)
     {
-      devLocation = wcsstr(renderdocPathLower, L"\\x64\\release\\");
+      devLocation = wcsstr(renderdevPathLower, L"\\x64\\release\\");
 
       if(devLocation)
       {
-        size_t idx = devLocation - renderdocPathLower;
+        size_t idx = devLocation - renderdevPathLower;
 
-        renderdocPath[idx] = 0;
+        renderdevPath[idx] = 0;
 
-        wcscat_s(renderdocPath, L"\\Win32\\Release\\renderdoccmd.exe");
+        wcscat_s(renderdevPath, L"\\Win32\\Release\\renderdevcmd.exe");
       }
     }
 
@@ -757,58 +757,58 @@ rdcpair<RDResult, uint32_t> Process::InjectIntoProcess(uint32_t pid,
       // look in a subfolder for x86.
 
       // remove the filename from the path
-      wchar_t *slash = wcsrchr(renderdocPath, L'\\');
+      wchar_t *slash = wcsrchr(renderdevPath, L'\\');
 
       if(slash)
         *slash = 0;
 
       // append path
-      wcscat_s(renderdocPath, L"\\x86\\renderdoccmd.exe");
+      wcscat_s(renderdevPath, L"\\x86\\renderdevcmd.exe");
     }
 #else
     // if it looks like we're in the development environment, look for the alternate bitness in the
     // corresponding folder
-    const wchar_t *devLocation = wcsstr(renderdocPathLower, L"\\win32\\development\\");
+    const wchar_t *devLocation = wcsstr(renderdevPathLower, L"\\win32\\development\\");
     if(devLocation)
     {
-      size_t idx = devLocation - renderdocPathLower;
+      size_t idx = devLocation - renderdevPathLower;
 
-      renderdocPath[idx] = 0;
+      renderdevPath[idx] = 0;
 
-      wcscat_s(renderdocPath, L"\\x64\\Development\\renderdoccmd.exe");
+      wcscat_s(renderdevPath, L"\\x64\\Development\\renderdevcmd.exe");
     }
 
     if(!devLocation)
     {
-      devLocation = wcsstr(renderdocPathLower, L"\\win32\\release\\");
+      devLocation = wcsstr(renderdevPathLower, L"\\win32\\release\\");
 
       if(devLocation)
       {
-        size_t idx = devLocation - renderdocPathLower;
+        size_t idx = devLocation - renderdevPathLower;
 
-        renderdocPath[idx] = 0;
+        renderdevPath[idx] = 0;
 
-        wcscat_s(renderdocPath, L"\\x64\\Release\\renderdoccmd.exe");
+        wcscat_s(renderdevPath, L"\\x64\\Release\\renderdevcmd.exe");
       }
     }
 
     if(!devLocation)
     {
-      // look upwards on 32-bit to find the parent renderdoccmd.
-      wchar_t *slash = wcsrchr(renderdocPath, L'\\');
+      // look upwards on 32-bit to find the parent renderdevcmd.
+      wchar_t *slash = wcsrchr(renderdevPath, L'\\');
 
       // remove the filename
       if(slash)
         *slash = 0;
 
       // remove the \\x86
-      slash = wcsrchr(renderdocPath, L'\\');
+      slash = wcsrchr(renderdevPath, L'\\');
 
       if(slash)
         *slash = 0;
 
       // append path
-      wcscat_s(renderdocPath, L"\\renderdoccmd.exe");
+      wcscat_s(renderdevPath, L"\\renderdevcmd.exe");
     }
 #endif
 
@@ -841,7 +841,7 @@ rdcpair<RDResult, uint32_t> Process::InjectIntoProcess(uint32_t pid,
     _snwprintf_s(
         paramsAlloc, 2047, 2047,
         L"\"%ls\" capaltbit --pid=%u --capfile=\"%ls\" --debuglog=\"%ls\" --capopts=\"%hs\"",
-        renderdocPath, pid, wcapturefile.c_str(), wdebugLogfile.c_str(), optstr.c_str());
+        renderdevPath, pid, wcapturefile.c_str(), wdebugLogfile.c_str(), optstr.c_str());
 
     RDCDEBUG("params %ls", paramsAlloc);
 
@@ -924,14 +924,14 @@ rdcpair<RDResult, uint32_t> Process::InjectIntoProcess(uint32_t pid,
     if(!retValue)
     {
       RDResult result;
-#if RENDERDOC_OFFICIAL_BUILD
+#if RENDERDEV_OFFICIAL_BUILD
       SET_ERROR_RESULT(result, ResultCode::InternalError,
-                       "Can't run 32-bit renderdoccmd to capture 32-bit program.");
+                       "Can't run 32-bit renderdevcmd to capture 32-bit program.");
 #else
       SET_ERROR_RESULT(
           result, ResultCode::InternalError,
-          "Can't run 32-bit renderdoccmd to capture 32-bit program."
-          "If this is a locally built RenderDoc you must build both 32-bit and 64-bit versions.");
+          "Can't run 32-bit renderdevcmd to capture 32-bit program."
+          "If this is a locally built RenderDev you must build both 32-bit and 64-bit versions.");
 #endif
       CloseHandle(hProcess);
       return {result, 0};
@@ -958,19 +958,19 @@ rdcpair<RDResult, uint32_t> Process::InjectIntoProcess(uint32_t pid,
       return {result, 0};
     }
 
-    if(exitCode < RenderDoc_FirstTargetControlPort)
+    if(exitCode < RenderDev_FirstTargetControlPort)
     {
       ResultCode code = (ResultCode)exitCode;
 
       RDResult result;
-      SET_ERROR_RESULT(result, code, "32-bit renderdoccmd returned '%s'", ToStr(code).c_str());
+      SET_ERROR_RESULT(result, code, "32-bit renderdevcmd returned '%s'", ToStr(code).c_str());
       return {code, 0};
     }
 
     return {ResultCode::Succeeded, (uint32_t)exitCode};
   }
 
-  InjectDLL(hProcess, renderdocPath);
+  InjectDLL(hProcess, renderdevPath);
 
   const char *rdoc_dll = STRINGIZE(RDOC_BASE_NAME);
 
@@ -1148,7 +1148,7 @@ rdcpair<RDResult, uint32_t> Process::LaunchAndInjectIntoProcess(
     RDResult result;
     SET_ERROR_RESULT(
         result, ResultCode::InjectionFailed,
-        "For safety reasons RenderDoc does not support capturing executables with a "
+        "For safety reasons RenderDev does not support capturing executables with a "
         "reserved system filename such as '%s'. Please rename your executable to capture.",
         get_basename(app).c_str());
     return {result, 0};
@@ -1221,7 +1221,7 @@ static RDResult HandleRegError(HKEY keyNative, HKEY keyWow32, LSTATUS ret, const
 
   RETURN_ERROR_RESULT(ResultCode::InjectionFailed,
                       "Error updating registry to enable global hook.\n"
-                      "Check that RenderDoc is correctly running as administrator.");
+                      "Check that RenderDev is correctly running as administrator.");
 }
 
 #define REG_CHECK(msg)                                    \
@@ -1247,8 +1247,8 @@ RDResult BackupAndChangeRegistry(GlobalHookData &hookdata, const rdcstr &shimpat
   {
     RETURN_ERROR_RESULT(
         ResultCode::FileIOFailed,
-        "RenderDoc is installed on a volume or system that has short paths disabled.\n"
-        "For the global hook, short paths must be enabled where RenderDoc is installed.");
+        "RenderDev is installed on a volume or system that has short paths disabled.\n"
+        "For the global hook, short paths must be enabled where RenderDev is installed.");
   }
 
   if(!shimpathWow32.empty())
@@ -1260,8 +1260,8 @@ RDResult BackupAndChangeRegistry(GlobalHookData &hookdata, const rdcstr &shimpat
     {
       RETURN_ERROR_RESULT(
           ResultCode::FileIOFailed,
-          "RenderDoc is installed on a volume or system that has short paths disabled.\n"
-          "For the global hook, short paths must be enabled where RenderDoc is installed.");
+          "RenderDev is installed on a volume or system that has short paths disabled.\n"
+          "For the global hook, short paths must be enabled where RenderDev is installed.");
     }
   }
 
@@ -1379,7 +1379,7 @@ RDResult BackupAndChangeRegistry(GlobalHookData &hookdata, const rdcstr &shimpat
   // write it to disk but don't fail if we can't, just print it to the log and keep going.
   wchar_t reg_backup[MAX_PATH];
   GetTempPathW(MAX_PATH, reg_backup);
-  wcscat_s(reg_backup, L"RenderDoc_RestoreGlobalHook.reg");
+  wcscat_s(reg_backup, L"RenderDev_RestoreGlobalHook.reg");
 
   FILE *f = NULL;
   _wfopen_s(&f, reg_backup, L"w");
@@ -1492,57 +1492,57 @@ RDResult Process::StartGlobalHook(const rdcstr &pathmatch, const rdcstr &capture
                         "Invalid global hook parameter, empty path to match");
   }
 
-  rdcstr renderdocPath;
-  FileIO::GetLibraryFilename(renderdocPath);
+  rdcstr renderdevPath;
+  FileIO::GetLibraryFilename(renderdevPath);
 
-  renderdocPath = get_dirname(renderdocPath);
+  renderdevPath = get_dirname(renderdevPath);
 
-  // the native renderdoccmd.exe is always next to the dll. Wow32 will be somewhere else
-  rdcstr cmdpathNative = renderdocPath + "\\renderdoccmd.exe";
+  // the native renderdevcmd.exe is always next to the dll. Wow32 will be somewhere else
+  rdcstr cmdpathNative = renderdevPath + "\\renderdevcmd.exe";
   rdcstr cmdpathWow32;
 
-  rdcstr shimpathNative = renderdocPath;
+  rdcstr shimpathNative = renderdevPath;
   rdcstr shimpathWow32;
 
 #if ENABLED(RDOC_X64)
 
-  // native shim is just renderdocshim64.dll
-  shimpathNative = renderdocPath + "\\renderdocshim64.dll";
+  // native shim is just renderdevshim64.dll
+  shimpathNative = renderdevPath + "\\renderdevshim64.dll";
 
   // if it looks like we're in the development environment, look for the alternate bitness in the
   // corresponding folder
-  int devLocation = renderdocPath.find("\\x64\\Development");
+  int devLocation = renderdevPath.find("\\x64\\Development");
   if(devLocation >= 0)
   {
-    renderdocPath.erase(devLocation, ~0U);
+    renderdevPath.erase(devLocation, ~0U);
 
-    shimpathWow32 = renderdocPath + "\\Win32\\Development\\renderdocshim32.dll";
-    cmdpathWow32 = renderdocPath + "\\Win32\\Development\\renderdoccmd.exe";
+    shimpathWow32 = renderdevPath + "\\Win32\\Development\\renderdevshim32.dll";
+    cmdpathWow32 = renderdevPath + "\\Win32\\Development\\renderdevcmd.exe";
   }
   else
   {
-    devLocation = renderdocPath.find("\\x64\\Release");
+    devLocation = renderdevPath.find("\\x64\\Release");
 
     if(devLocation >= 0)
     {
-      renderdocPath.erase(devLocation, ~0U);
+      renderdevPath.erase(devLocation, ~0U);
 
-      shimpathWow32 = renderdocPath + "\\Win32\\Release\\renderdocshim32.dll";
-      cmdpathWow32 = renderdocPath + "\\Win32\\Release\\renderdoccmd.exe";
+      shimpathWow32 = renderdevPath + "\\Win32\\Release\\renderdevshim32.dll";
+      cmdpathWow32 = renderdevPath + "\\Win32\\Release\\renderdevcmd.exe";
     }
   }
 
   // if we're not in the dev environment, assume it's under a x86\ subfolder
   if(devLocation < 0)
   {
-    shimpathWow32 = renderdocPath + "\\x86\\renderdocshim32.dll";
-    cmdpathWow32 = renderdocPath + "\\x86\\renderdoccmd.exe";
+    shimpathWow32 = renderdevPath + "\\x86\\renderdevshim32.dll";
+    cmdpathWow32 = renderdevPath + "\\x86\\renderdevcmd.exe";
   }
 
 #else
 
   // nothing fancy to do here for 32-bit, just point the shim next to our dll.
-  shimpathNative = renderdocPath + "\\renderdocshim32.dll";
+  shimpathNative = renderdevPath + "\\renderdevshim32.dll";
 
 #endif
 
@@ -1630,7 +1630,7 @@ RDResult Process::StartGlobalHook(const rdcstr &pathmatch, const rdcstr &capture
   {
     CloseHandle(hookdata.dataNative.pipe);
     RestoreRegistry(hookdata);
-    RETURN_ERROR_RESULT(ResultCode::InternalError, "Can't launch renderdoccmd from '%s' (err %u)",
+    RETURN_ERROR_RESULT(ResultCode::InternalError, "Can't launch renderdevcmd from '%s' (err %u)",
                         cmdpathNative.c_str(), err);
   }
 
@@ -1639,7 +1639,7 @@ RDResult Process::StartGlobalHook(const rdcstr &pathmatch, const rdcstr &capture
 
   RDCEraseEl(pi);
 
-// repeat the process for the Wow32 renderdoccmd
+// repeat the process for the Wow32 renderdevcmd
 #if ENABLED(RDOC_X64)
   params = StringFormat::Fmt(
       "\"%s\" globalhook --match \"%s\" --capfile \"%s\" --debuglog \"%s\" --capopts \"%s\"",
@@ -1691,7 +1691,7 @@ RDResult Process::StartGlobalHook(const rdcstr &pathmatch, const rdcstr &capture
     CloseHandle(hookdata.dataNative.pipe);
     CloseHandle(hookdata.dataWow32.pipe);
     RestoreRegistry(hookdata);
-    RETURN_ERROR_RESULT(ResultCode::InternalError, "Can't launch renderdoccmd from '%s' (err %u)",
+    RETURN_ERROR_RESULT(ResultCode::InternalError, "Can't launch renderdevcmd from '%s' (err %u)",
                         cmdpathWow32.c_str(), err);
   }
 
