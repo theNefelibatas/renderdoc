@@ -67,6 +67,26 @@ static BOOL add_hooks()
 
   RDCLOG("Loading into %ls", curFile);
 
+  // UE5 delay-loads d3d12.dll/dxgi.dll: they are not in the process yet when our DllMain runs
+  // (SetThreadContext injection runs us before any game code). Without them loaded,
+  // HookAllModules cannot find DllHooks["d3d12.dll"].module and the D3D12/DXGI hooks never
+  // apply, leaving API=None. Force-load the System32 copies up front so the hook tables are
+  // populated by the time RegisterHooks() -> EndHookRegistration() -> HookAllModules() runs.
+  // Use absolute System32 paths so we never accidentally load a game-local copy (e.g. an
+  // Agility SDK D3D12Core.dll sitting next to the exe).
+  {
+    wchar_t sysDir[MAX_PATH] = {0};
+    GetSystemDirectoryW(sysDir, MAX_PATH);
+
+    wchar_t d3d12Path[MAX_PATH] = {0};
+    wsprintfW(d3d12Path, L"%s\\d3d12.dll", sysDir);
+    LoadLibraryW(d3d12Path);
+
+    wchar_t dxgiPath[MAX_PATH] = {0};
+    wsprintfW(dxgiPath, L"%s\\dxgi.dll", sysDir);
+    LoadLibraryW(dxgiPath);
+  }
+
   LibraryHooks::RegisterHooks();
 
   return TRUE;
