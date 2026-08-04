@@ -896,6 +896,7 @@ private:
                                                D3D_FEATURE_LEVEL MinimumFeatureLevel, REFIID riid,
                                                void **ppDevice)
   {
+    RDCLOG(">>> D3D12CreateDevice_hook CALLED adapter=%p", (void *)pAdapter);
     PFN_D3D12_CREATE_DEVICE createFunc = d3d12hooks.CreateDevice();
 
     if(!createFunc)
@@ -978,6 +979,7 @@ private:
 
   static HRESULT WINAPI D3D12GetInterface_hook(REFCLSID rclsid, REFIID riid, void **ppvDebug)
   {
+    RDCLOG(">>> D3D12GetInterface_hook CALLED riid %s", ToStr(riid).c_str());
     if(riid == CLSID_D3D12StateObjectFactory)
     {
       RDCLOG("Deliberately reporting no support for state object factories");
@@ -989,11 +991,15 @@ private:
 
     HRESULT hr = GetWrappedInterface(realUnk, riid, ppvDebug);
 
+    if(SUCCEEDED(hr))
+    {
+      if(realUnk)
+        realUnk->Release();
+      return hr;
+    }
+
     if(realUnk)
       realUnk->Release();
-
-    if(SUCCEEDED(hr))
-      return hr;
 
     RDCWARN("Unknown UUID passed to D3D12GetInterface: %s (clsid %s). Real call %s succeed (%x).",
             ToStr(riid).c_str(), ToStr(rclsid).c_str(), SUCCEEDED(real) ? "did" : "did not", real);
