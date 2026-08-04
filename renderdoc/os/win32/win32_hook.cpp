@@ -37,6 +37,8 @@
 #include "os/os_specific.h"
 #include "strings/string_utils.h"
 
+#include "minhook/include/MinHook.h"
+
 #define VERBOSE_DEBUG_HOOK OPTION_OFF
 
 // map from address of IAT entry, to original contents
@@ -975,6 +977,106 @@ void LibraryHooks::EndHookRegistration()
     HookAllModules();
 
     s_HookData->missedOrdinals = false;
+  }
+
+  // Inline (callee-side) hooks via MinHook. IAT hooking above only catches calls that go through
+  // an import thunk; games that resolve D3D12/DXGI entry points via GetProcAddress and call through
+  // the returned pointer bypass IAT hooks entirely (no import entry to patch). To intercept that
+  // path we patch the function entry point itself in the System32 copy of the DLL, so no matter
+  // how the game obtains the pointer it lands in our hook. This mirrors what interceptor-lib does
+  // on Android. See docs/wuthering-waves-capture-attempt.md sec.18.
+  //
+  // Verified necessary for Wuthering Waves: disabling this block (leaving only IAT hooks +
+  // Hooked_GetProcAddress) causes API to drop back to None, because the packed base dll resolves
+  // D3D12CreateDevice via its own GetProcAddress path that bypasses our IAT-hooked GetProcAddress.
+  // Only a callee-side inline hook on the System32 d3d12.dll/dxgi.dll export catches that call.
+  {
+    MH_STATUS mhInit = MH_Initialize();
+    if(mhInit != MH_OK && mhInit != MH_ERROR_ALREADY_INITIALIZED)
+    {
+      RDCERR("MH_Initialize failed: %d", (int)mhInit);
+    }
+    else
+    {
+      // Only the graphics DLLs that games resolve dynamically and call through pointers need
+      // inline hooks. The IAT pass above already handled import-based calls.
+      const char *inlineHookDlls[] = {"dxgi.dll", "d3d12.dll", "d3d11.dll"};
+
+      for(const char *dllName : inlineHookDlls)
+      {
+        auto it = s_HookData->DllHooks.find(dllName);
+        if(it == s_HookData->DllHooks.end() || it->second.module == NULL)
+          continue;
+
+        // Prefer the System32 copy of the DLL for inline hooking. If a proxy DLL with the same
+        // name is loaded (e.g. a game-local dxgi.dll), ForAllModules may have recorded it as the
+        // primary module and pushed the real one to altmodules. The proxy's exports are never
+        // called by the game (it uses cached pointers straight to System32), so hooking the proxy
+        // would be useless. Walk module + altmodules and pick whichever lives under System32.
+        HMODULE hookModule = it->second.module;
+        {
+          wchar_t sysDir[MAX_PATH] = {0};
+          GetSystemDirectoryW(sysDir, MAX_PATH);
+          size_t sysDirLen = wcslen(sysDir);
+
+          auto tryPreferSystem = [&](HMODULE mod) -> bool {
+            wchar_t modPath[MAX_PATH] = {0};
+            GetModuleFileNameW(mod, modPath, MAX_PATH - 1);
+            // case-insensitive prefix match against the System32 directory
+            if(_wcsnicmp(modPath, sysDir, sysDirLen) == 0)
+            {
+              hookModule = mod;
+              return true;
+            }
+            return false;
+          };
+
+          if(!tryPreferSystem(hookModule))
+          {
+            for(size_t ai = 0; ai < it->second.altmodules.size(); ai++)
+            {
+              if(tryPreferSystem(it->second.altmodules[ai]))
+                break;
+            }
+          }
+        }
+
+        for(FunctionHook &hook : it->second.FunctionHooks)
+        {
+          if(!hook.orig || !hook.hook)
+            continue;
+
+          // Unconditionally re-resolve the target from the confirmed System32 module. *hook.orig
+          // may have been filled during the IAT pass above from a different (proxy) module, so we
+          // cannot trust it here. We overwrite *hook.orig with the trampoline after the inline
+          // hook is installed, so the hook function can call onward to the real implementation.
+          void *target = (void *)GetProcAddress(hookModule, hook.function.c_str());
+
+          if(target == NULL || target == hook.hook)
+            continue;
+
+          void *trampoline = NULL;
+          MH_STATUS cr = MH_CreateHook(target, hook.hook, &trampoline);
+          if(cr != MH_OK)
+          {
+            RDCERR("MH_CreateHook failed for %s!%s: %d", dllName, hook.function.c_str(), (int)cr);
+            continue;
+          }
+
+          MH_STATUS en = MH_EnableHook(target);
+          if(en != MH_OK)
+          {
+            RDCERR("MH_EnableHook failed for %s!%s: %d", dllName, hook.function.c_str(), (int)en);
+            continue;
+          }
+
+          *hook.orig = trampoline;
+
+          RDCLOG("Inline hooked %s!%s (target=%p -> hook=%p, trampoline=%p)", dllName,
+                 hook.function.c_str(), target, hook.hook, trampoline);
+        }
+      }
+    }
   }
 }
 

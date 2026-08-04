@@ -127,6 +127,12 @@
     <Filter Include="3rdparty\miniz">
       <UniqueIdentifier>{5994c355-880b-45b9-b17a-2e9e1fc2044a}</UniqueIdentifier>
     </Filter>
+    <Filter Include="3rdparty\minhook">
+      <UniqueIdentifier>{a1b2c3d4-e5f6-7890-abcd-ef0123456789}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="3rdparty\minhook\hde">
+      <UniqueIdentifier>{b2c3d4e5-f6a7-8901-bcde-f01234567890}</UniqueIdentifier>
+    </Filter>
     <Filter Include="3rdparty\compressonator">
       <UniqueIdentifier>{3d212b9b-bf42-40db-84a3-b94e064fd281}</UniqueIdentifier>
     </Filter>
@@ -925,6 +931,18 @@
     </ClCompile>
     <ClCompile Include="3rdparty\miniz\miniz.c">
       <Filter>3rdparty\miniz</Filter>
+    </ClCompile>
+    <ClCompile Include="3rdparty\minhook\src\buffer.c">
+      <Filter>3rdparty\minhook</Filter>
+    </ClCompile>
+    <ClCompile Include="3rdparty\minhook\src\hook.c">
+      <Filter>3rdparty\minhook</Filter>
+    </ClCompile>
+    <ClCompile Include="3rdparty\minhook\src\trampoline.c">
+      <Filter>3rdparty\minhook</Filter>
+    </ClCompile>
+    <ClCompile Include="3rdparty\minhook\src\hde\hde64.c">
+      <Filter>3rdparty\minhook\hde</Filter>
     </ClCompile>
     <ClCompile Include="common\threading_tests.cpp">
       <Filter>Common</Filter>

@@ -35,6 +35,7 @@
 #include "strings/string_utils.h"
 
 #include <string>
+#include <vector>
 
 static rdcarray<EnvironmentModification> &GetEnvModifications()
 {
@@ -133,7 +134,7 @@ static void ApplyEnvModifications(EnvMap &envValues,
 }
 
 // on windows we apply environment changes here, after process initialisation
-// but before any real work (in RenderDev::Initialise) so that we support
+// but before any real work (in RenderDoc::Initialise) so that we support
 // injecting the dll into processes we didn't launch (ie didn't control the
 // starting environment for), or even the application loading the dll itself
 // without any interaction with our replay app.
@@ -195,24 +196,24 @@ uint64_t Process::GetMemoryUsage()
 extern "C" __declspec(dllexport) void __cdecl INTERNAL_GetTargetControlIdent(uint32_t *ident)
 {
   if(ident)
-    *ident = RenderDev::Inst().GetTargetControlIdent();
+    *ident = RenderDoc::Inst().GetTargetControlIdent();
 }
 
 extern "C" __declspec(dllexport) void __cdecl INTERNAL_SetCaptureOptions(CaptureOptions *opts)
 {
   if(opts)
-    RenderDev::Inst().SetCaptureOptions(*opts);
+    RenderDoc::Inst().SetCaptureOptions(*opts);
 }
 
 extern "C" __declspec(dllexport) void __cdecl INTERNAL_SetCaptureFile(const char *capfile)
 {
   if(capfile)
-    RenderDev::Inst().SetCaptureFileTemplate(capfile);
+    RenderDoc::Inst().SetCaptureFileTemplate(capfile);
 }
 
 extern "C" __declspec(dllexport) void __cdecl INTERNAL_SetDebugLogFile(const char *logfile)
 {
-  RENDERDEV_SetDebugLogFile(logfile ? logfile : rdcstr());
+  RENDERDOC_SetDebugLogFile(logfile ? logfile : rdcstr());
 }
 
 static EnvironmentModification tempEnvMod;
@@ -398,7 +399,232 @@ uintptr_t FindRemoteDLL(DWORD pid, rdcstr libName)
   return ret;
 }
 
-void InjectFunctionCall(HANDLE hProcess, uintptr_t renderdev_remote, const char *funcName,
+// Stealth injection via SetThreadContext: hijack the main thread (which is suspended from
+// CREATE_SUSPENDED) by rewriting its context to run a small shellcode trampoline that calls
+// LoadLibraryW on our dll, then spins until we suspend it and restore the original context.
+// This avoids CreateRemoteThread entirely, which is the API most anti-injection / anti-cheat
+// solutions (e.g. CrashSight) hook to block or detect DLL injection.
+//
+// x64 only. 32-bit targets fall back to the standard CreateRemoteThread path.
+//
+// Layout of the shellcode (x64):
+//   48 83 E4 F0     and rsp, ~0xF                ; force 16-byte stack alignment
+//   48 83 EC 20     sub rsp, 0x20                ; 32 bytes of shadow space for the callee
+//   48 B9 <imm64>   mov rcx, <dllpath_ptr>       ; arg1 = LPCWSTR lpLibFileName
+//   48 B8 <imm64>   mov rax, <LoadLibraryW_addr> ; kernel32 is at a fixed address across procs
+//   FF D0           call rax                     ; LoadLibraryW(dllPath)
+//   EB FE           jmp $-2                      ; infinite spin until we suspend the thread
+// The dll path string is written right after the shellcode in the same allocation. We do NOT
+// jump back to the original RIP inside the shellcode - that would race: the process could run
+// real code before we finish configuring capture options. Instead the thread spins, we
+// SuspendThread it, restore RIP (and the original RSP, still held in the saved context) via
+// SetThreadContext, and the caller resumes it for good.
+//
+// Stack alignment matters: the x64 ABI requires Rsp to be 16-byte aligned at the call site and
+// 32 bytes of shadow space reserved for the callee. Without the and/sub prologue the loader
+// faults on aligned moves inside LoadLibraryW and the process dies before reaching the spin -
+// which surfaces as SuspendThread returning ERROR_ACCESS_DENIED on a now-terminated thread.
+//
+// Completion is signalled by the EB FE spin loop, not by polling the module list: we suspend
+// the thread and check that RIP points inside the spin instruction. The module list can show
+// the dll before LoadLibraryW has actually returned (the loader is still tearing down its
+// internal state), so only RIP-at-spin is a reliable "LoadLibraryW returned" signal.
+static uintptr_t InjectDLLViaThreadContext(HANDLE hProcess, HANDLE hThread, const rdcwstr &libName)
+{
+#if ENABLED(RDOC_X64)
+  // Resolve LoadLibraryW locally; kernel32 is mapped at the same address in every process,
+  // so the absolute address is valid in the remote process too.
+  static HMODULE kernel32 = GetModuleHandleA("kernel32.dll");
+  if(kernel32 == NULL)
+  {
+    RDCERR("InjectDLLViaThreadContext: kernel32 not loaded");
+    return 0;
+  }
+
+  void *loadLibraryW = (void *)GetProcAddress(kernel32, "LoadLibraryW");
+  if(loadLibraryW == NULL)
+  {
+    RDCERR("InjectDLLViaThreadContext: LoadLibraryW not found");
+    return 0;
+  }
+
+  // dll path as wide chars, null-terminated.
+  wchar_t dllPath[MAX_PATH + 1] = {0};
+  wcsncpy_s(dllPath, libName.c_str(), _TRUNCATE);
+  size_t dllPathBytes = (wcslen(dllPath) + 1) * sizeof(wchar_t);
+
+  const size_t shellcodeSize = 4 + 4 + 10 + 10 + 2 + 2;    // and rsp, sub rsp, mov rcx, mov rax,
+  // call rax, jmp spin = 32
+  const size_t totalSize = shellcodeSize + dllPathBytes;
+
+  void *remoteMem = VirtualAllocEx(hProcess, NULL, totalSize, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+  if(remoteMem == NULL)
+  {
+    RDCERR("InjectDLLViaThreadContext: VirtualAllocEx failed: %u", GetLastError());
+    return 0;
+  }
+
+  // Capture the original thread context (must pass CONTEXT_FULL for x64).
+  CONTEXT ctx;
+  memset(&ctx, 0, sizeof(ctx));
+  ctx.ContextFlags = CONTEXT_FULL;
+  if(!GetThreadContext(hThread, &ctx))
+  {
+    RDCERR("InjectDLLViaThreadContext: GetThreadContext failed: %u", GetLastError());
+    VirtualFreeEx(hProcess, remoteMem, 0, MEM_RELEASE);
+    return 0;
+  }
+
+  uintptr_t originalRip = (uintptr_t)ctx.Rip;
+  uintptr_t dllPathRemote = (uintptr_t)remoteMem + shellcodeSize;
+
+  // Build the shellcode + dll path into a single sized buffer (no fixed-size stack buffer that
+  // could overflow on a long path).
+  uint8_t shellcode[32] = {0};
+  size_t off = 0;
+
+  // and rsp, ~0xF   (48 83 E4 F0) - force 16-byte stack alignment. The entry-point RIP we
+  // captured is not necessarily aligned to the ABI's 16-byte call-site requirement, and the
+  // loader uses aligned moves internally; without this LoadLibraryW faults before returning.
+  shellcode[off++] = 0x48;
+  shellcode[off++] = 0x83;
+  shellcode[off++] = 0xE4;
+  shellcode[off++] = 0xF0;
+
+  // sub rsp, 0x20  (48 83 EC 20) - reserve 32 bytes of shadow space for the callee.
+  shellcode[off++] = 0x48;
+  shellcode[off++] = 0x83;
+  shellcode[off++] = 0xEC;
+  shellcode[off++] = 0x20;
+
+  // mov rcx, &dllPath   (48 B9 imm64)
+  shellcode[off++] = 0x48;
+  shellcode[off++] = 0xB9;
+  memcpy(shellcode + off, &dllPathRemote, 8);
+  off += 8;
+
+  // mov rax, LoadLibraryW  (48 B8 imm64)
+  shellcode[off++] = 0x48;
+  shellcode[off++] = 0xB8;
+  memcpy(shellcode + off, &loadLibraryW, 8);
+  off += 8;
+
+  // call rax  (FF D0)
+  shellcode[off++] = 0xFF;
+  shellcode[off++] = 0xD0;
+
+  // jmp $-2  (EB FE) - infinite spin until we suspend the thread.
+  shellcode[off++] = 0xEB;
+  shellcode[off++] = 0xFE;
+
+  // Address of the spin instruction in the remote process, used as the completion sentinel.
+  uintptr_t spinAddr = (uintptr_t)remoteMem + shellcodeSize - 2;
+
+  std::vector<uint8_t> buf(totalSize);
+  memcpy(buf.data(), shellcode, shellcodeSize);
+  memcpy(buf.data() + shellcodeSize, dllPath, dllPathBytes);
+  SIZE_T written = 0;
+  if(!WriteProcessMemory(hProcess, remoteMem, buf.data(), totalSize, &written))
+  {
+    RDCERR("InjectDLLViaThreadContext: WriteProcessMemory failed: %u", GetLastError());
+    VirtualFreeEx(hProcess, remoteMem, 0, MEM_RELEASE);
+    return 0;
+  }
+
+  // Point RIP at the shellcode and resume. The thread calls LoadLibraryW (loading our dll),
+  // then spins forever - it never runs the real program until we restore RIP below.
+  ctx.Rip = (DWORD64)remoteMem;
+  if(!SetThreadContext(hThread, &ctx))
+  {
+    RDCERR("InjectDLLViaThreadContext: SetThreadContext failed: %u", GetLastError());
+    VirtualFreeEx(hProcess, remoteMem, 0, MEM_RELEASE);
+    return 0;
+  }
+
+  if(ResumeThread(hThread) == (DWORD)-1)
+  {
+    RDCERR("InjectDLLViaThreadContext: ResumeThread failed: %u", GetLastError());
+    VirtualFreeEx(hProcess, remoteMem, 0, MEM_RELEASE);
+    return 0;
+  }
+
+  // Wait until LoadLibraryW has returned. We suspend the thread and check that RIP points at
+  // the EB FE spin instruction - that only happens once the call rax returns. Polling the
+  // module list is not enough: the loader publishes the module before LoadLibraryW returns.
+  uintptr_t loc = 0;
+  bool atSpin = false;
+  for(int i = 0; i < 200; i++)
+  {
+    DWORD susErr = SuspendThread(hThread);
+    if(susErr == (DWORD)-1)
+    {
+      DWORD err = GetLastError();
+      RDCERR("InjectDLLViaThreadContext: SuspendThread failed: %u", GetLastError());
+      // ERROR_ACCESS_DENIED (5) on a thread handle almost always means the owning process has
+      // already exited - typically because LoadLibraryW faulted and the loader tore the
+      // process down. Treat as a hard failure rather than looping on a dead thread.
+      if(err == ERROR_ACCESS_DENIED)
+        return 0;
+      // Can't safely probe RIP - fall back to module-list detection.
+      break;
+    }
+
+    CONTEXT probe;
+    memset(&probe, 0, sizeof(probe));
+    probe.ContextFlags = CONTEXT_CONTROL;
+    if(GetThreadContext(hThread, &probe) && (uintptr_t)probe.Rip == spinAddr)
+    {
+      atSpin = true;
+      loc = FindRemoteDLL(GetProcessId(hProcess), STRINGIZE(RDOC_BASE_NAME) ".dll");
+      break;
+    }
+
+    // Not at the spin yet - resume and wait a little more.
+    ResumeThread(hThread);
+    Sleep(10);
+  }
+
+  // If we never observed the spin (timeout or suspend failure), make one last best-effort
+  // attempt to suspend the thread so the restore below is well-defined, then fall back to
+  // module-list detection.
+  if(!atSpin)
+  {
+    if(SuspendThread(hThread) == (DWORD)-1)
+    {
+      RDCERR("InjectDLLViaThreadContext: final SuspendThread failed: %u", GetLastError());
+      // Thread is still running our shellcode (or has escaped). Leaving it alone is safer than
+      // restoring RIP blind; the caller will TerminateProcess on the failed injection path.
+      return 0;
+    }
+    loc = FindRemoteDLL(GetProcessId(hProcess), STRINGIZE(RDOC_BASE_NAME) ".dll");
+  }
+
+  // Restore the original RIP *and RSP* so that when the caller resumes the thread, the process
+  // runs from its real entry point as if nothing happened. RSP must be restored because the
+  // shellcode's and/sub moved it; the saved ctx still holds the original Rsp.
+  ctx.Rip = (DWORD64)originalRip;
+  if(!SetThreadContext(hThread, &ctx))
+  {
+    RDCERR("InjectDLLViaThreadContext: restore SetThreadContext failed: %u", GetLastError());
+    // Don't leave the thread suspended on a failed restore.
+    ResumeThread(hThread);
+    return loc;
+  }
+
+  // The thread no longer executes the shellcode (RIP is restored); safe to release the page.
+  VirtualFreeEx(hProcess, remoteMem, 0, MEM_RELEASE);
+
+  return loc;
+#else
+  (void)hProcess;
+  (void)hThread;
+  (void)libName;
+  RDCERR("InjectDLLViaThreadContext: only supported on x64");
+  return 0;
+#endif
+}
+
+void InjectFunctionCall(HANDLE hProcess, uintptr_t renderdoc_remote, const char *funcName,
                         void *data, const size_t dataLen)
 {
   if(dataLen == 0)
@@ -409,14 +635,14 @@ void InjectFunctionCall(HANDLE hProcess, uintptr_t renderdev_remote, const char 
 
   RDCDEBUG("Injecting call to %s", funcName);
 
-  HMODULE renderdev_local = GetModuleHandleA(STRINGIZE(RDOC_BASE_NAME) ".dll");
+  HMODULE renderdoc_local = GetModuleHandleA(STRINGIZE(RDOC_BASE_NAME) ".dll");
 
-  uintptr_t func_local = (uintptr_t)GetProcAddress(renderdev_local, funcName);
+  uintptr_t func_local = (uintptr_t)GetProcAddress(renderdoc_local, funcName);
 
   // we've found SetCaptureOptions in our local instance of the module, now calculate the offset and
   // so get the function
   // in the remote module (which might be loaded at a different base address
-  uintptr_t func_remote = func_local + renderdev_remote - (uintptr_t)renderdev_local;
+  uintptr_t func_remote = func_local + renderdoc_remote - (uintptr_t)renderdoc_local;
 
   void *remoteMem = VirtualAllocEx(hProcess, NULL, dataLen, MEM_COMMIT, PAGE_EXECUTE_READWRITE);
   SIZE_T numWritten;
@@ -607,23 +833,23 @@ rdcpair<RDResult, uint32_t> Process::InjectIntoProcess(uint32_t pid,
       RDCDEBUG("Timed out waiting for debugger, gave up after %u s", opts.delayForDebugger);
   }
 
-  RDCLOG("Injecting renderdev into process %lu", pid);
+  RDCLOG("Injecting renderdoc into process %lu", pid);
 
-  wchar_t renderdevPath[MAX_PATH] = {0};
-  GetModuleFileNameW(GetModuleHandleA(STRINGIZE(RDOC_BASE_NAME) ".dll"), &renderdevPath[0],
+  wchar_t renderdocPath[MAX_PATH] = {0};
+  GetModuleFileNameW(GetModuleHandleA(STRINGIZE(RDOC_BASE_NAME) ".dll"), &renderdocPath[0],
                                       MAX_PATH - 1);
 
-  wchar_t renderdevPathLower[MAX_PATH] = {0};
-  memcpy(renderdevPathLower, renderdevPath, MAX_PATH * sizeof(wchar_t));
-  for(size_t i = 0; i < MAX_PATH && renderdevPathLower[i]; i++)
+  wchar_t renderdocPathLower[MAX_PATH] = {0};
+  memcpy(renderdocPathLower, renderdocPath, MAX_PATH * sizeof(wchar_t));
+  for(size_t i = 0; i < MAX_PATH && renderdocPathLower[i]; i++)
   {
     // lowercase
-    if(renderdevPathLower[i] >= 'A' && renderdevPathLower[i] <= 'Z')
-      renderdevPathLower[i] = 'a' + char(renderdevPathLower[i] - 'A');
+    if(renderdocPathLower[i] >= 'A' && renderdocPathLower[i] <= 'Z')
+      renderdocPathLower[i] = 'a' + char(renderdocPathLower[i] - 'A');
 
     // normalise paths
-    if(renderdevPathLower[i] == '/')
-      renderdevPathLower[i] = '\\';
+    if(renderdocPathLower[i] == '/')
+      renderdocPathLower[i] = '\\';
   }
 
   BOOL isWow64 = FALSE;
@@ -669,15 +895,15 @@ rdcpair<RDResult, uint32_t> Process::InjectIntoProcess(uint32_t pid,
   // We don't support capturing 64-bit programs from a 32-bit install
   // because it's pointless - a 64-bit install will work for all in
   // that case. But we do want to handle the case of:
-  // 64-bit renderdev -> 32-bit program (via 32-bit renderdevcmd)
-  //    -> 64-bit program (going back to 64-bit renderdevcmd).
-  // so we try to see if we're an x86 invoked renderdevcmd in an
+  // 64-bit renderdoc -> 32-bit program (via 32-bit renderdoccmd)
+  //    -> 64-bit program (going back to 64-bit renderdoccmd).
+  // so we try to see if we're an x86 invoked renderdoccmd in an
   // otherwise 64-bit install, and 'promote' back to 64-bit.
   if(selfWow64 && !isWow64)
   {
-    wchar_t *slash = wcsrchr(renderdevPath, L'\\');
+    wchar_t *slash = wcsrchr(renderdocPath, L'\\');
 
-    if(slash && slash > renderdevPath + 4)
+    if(slash && slash > renderdocPath + 4)
     {
       slash -= 4;
 
@@ -692,9 +918,9 @@ rdcpair<RDResult, uint32_t> Process::InjectIntoProcess(uint32_t pid,
     // corresponding folder
     if(!capalt)
     {
-      const wchar_t *devLocation = wcsstr(renderdevPathLower, L"\\win32\\development\\");
+      const wchar_t *devLocation = wcsstr(renderdocPathLower, L"\\win32\\development\\");
       if(!devLocation)
-        devLocation = wcsstr(renderdevPathLower, L"\\win32\\release\\");
+        devLocation = wcsstr(renderdocPathLower, L"\\win32\\release\\");
 
       if(devLocation)
       {
@@ -706,13 +932,13 @@ rdcpair<RDResult, uint32_t> Process::InjectIntoProcess(uint32_t pid,
     // if we couldn't promote, then bail out.
     if(!capalt)
     {
-      RDCDEBUG("Running from %ls", renderdevPathLower);
+      RDCDEBUG("Running from %ls", renderdocPathLower);
 
       CloseHandle(hProcess);
       RDResult result;
       SET_ERROR_RESULT(result, ResultCode::IncompatibleProcess,
-                       "Can't capture 64-bit program with 32-bit build of RenderDev. Please run a "
-                       "64-bit build of RenderDev");
+                       "Can't capture 64-bit program with 32-bit build of RenderDoc. Please run a "
+                       "64-bit build of RenderDoc");
       return {result, 0};
     }
   }
@@ -728,27 +954,27 @@ rdcpair<RDResult, uint32_t> Process::InjectIntoProcess(uint32_t pid,
 #if ENABLED(RDOC_X64)
     // if it looks like we're in the development environment, look for the alternate bitness in the
     // corresponding folder
-    const wchar_t *devLocation = wcsstr(renderdevPathLower, L"\\x64\\development\\");
+    const wchar_t *devLocation = wcsstr(renderdocPathLower, L"\\x64\\development\\");
     if(devLocation)
     {
-      size_t idx = devLocation - renderdevPathLower;
+      size_t idx = devLocation - renderdocPathLower;
 
-      renderdevPath[idx] = 0;
+      renderdocPath[idx] = 0;
 
-      wcscat_s(renderdevPath, L"\\Win32\\Development\\renderdevcmd.exe");
+      wcscat_s(renderdocPath, L"\\Win32\\Development\\renderdevcmd.exe");
     }
 
     if(!devLocation)
     {
-      devLocation = wcsstr(renderdevPathLower, L"\\x64\\release\\");
+      devLocation = wcsstr(renderdocPathLower, L"\\x64\\release\\");
 
       if(devLocation)
       {
-        size_t idx = devLocation - renderdevPathLower;
+        size_t idx = devLocation - renderdocPathLower;
 
-        renderdevPath[idx] = 0;
+        renderdocPath[idx] = 0;
 
-        wcscat_s(renderdevPath, L"\\Win32\\Release\\renderdevcmd.exe");
+        wcscat_s(renderdocPath, L"\\Win32\\Release\\renderdevcmd.exe");
       }
     }
 
@@ -757,58 +983,58 @@ rdcpair<RDResult, uint32_t> Process::InjectIntoProcess(uint32_t pid,
       // look in a subfolder for x86.
 
       // remove the filename from the path
-      wchar_t *slash = wcsrchr(renderdevPath, L'\\');
+      wchar_t *slash = wcsrchr(renderdocPath, L'\\');
 
       if(slash)
         *slash = 0;
 
       // append path
-      wcscat_s(renderdevPath, L"\\x86\\renderdevcmd.exe");
+      wcscat_s(renderdocPath, L"\\x86\\renderdevcmd.exe");
     }
 #else
     // if it looks like we're in the development environment, look for the alternate bitness in the
     // corresponding folder
-    const wchar_t *devLocation = wcsstr(renderdevPathLower, L"\\win32\\development\\");
+    const wchar_t *devLocation = wcsstr(renderdocPathLower, L"\\win32\\development\\");
     if(devLocation)
     {
-      size_t idx = devLocation - renderdevPathLower;
+      size_t idx = devLocation - renderdocPathLower;
 
-      renderdevPath[idx] = 0;
+      renderdocPath[idx] = 0;
 
-      wcscat_s(renderdevPath, L"\\x64\\Development\\renderdevcmd.exe");
+      wcscat_s(renderdocPath, L"\\x64\\Development\\renderdevcmd.exe");
     }
 
     if(!devLocation)
     {
-      devLocation = wcsstr(renderdevPathLower, L"\\win32\\release\\");
+      devLocation = wcsstr(renderdocPathLower, L"\\win32\\release\\");
 
       if(devLocation)
       {
-        size_t idx = devLocation - renderdevPathLower;
+        size_t idx = devLocation - renderdocPathLower;
 
-        renderdevPath[idx] = 0;
+        renderdocPath[idx] = 0;
 
-        wcscat_s(renderdevPath, L"\\x64\\Release\\renderdevcmd.exe");
+        wcscat_s(renderdocPath, L"\\x64\\Release\\renderdevcmd.exe");
       }
     }
 
     if(!devLocation)
     {
-      // look upwards on 32-bit to find the parent renderdevcmd.
-      wchar_t *slash = wcsrchr(renderdevPath, L'\\');
+      // look upwards on 32-bit to find the parent renderdoccmd.
+      wchar_t *slash = wcsrchr(renderdocPath, L'\\');
 
       // remove the filename
       if(slash)
         *slash = 0;
 
       // remove the \\x86
-      slash = wcsrchr(renderdevPath, L'\\');
+      slash = wcsrchr(renderdocPath, L'\\');
 
       if(slash)
         *slash = 0;
 
       // append path
-      wcscat_s(renderdevPath, L"\\renderdevcmd.exe");
+      wcscat_s(renderdocPath, L"\\renderdevcmd.exe");
     }
 #endif
 
@@ -841,7 +1067,7 @@ rdcpair<RDResult, uint32_t> Process::InjectIntoProcess(uint32_t pid,
     _snwprintf_s(
         paramsAlloc, 2047, 2047,
         L"\"%ls\" capaltbit --pid=%u --capfile=\"%ls\" --debuglog=\"%ls\" --capopts=\"%hs\"",
-        renderdevPath, pid, wcapturefile.c_str(), wdebugLogfile.c_str(), optstr.c_str());
+        renderdocPath, pid, wcapturefile.c_str(), wdebugLogfile.c_str(), optstr.c_str());
 
     RDCDEBUG("params %ls", paramsAlloc);
 
@@ -924,14 +1150,14 @@ rdcpair<RDResult, uint32_t> Process::InjectIntoProcess(uint32_t pid,
     if(!retValue)
     {
       RDResult result;
-#if RENDERDEV_OFFICIAL_BUILD
+#if RENDERDOC_OFFICIAL_BUILD
       SET_ERROR_RESULT(result, ResultCode::InternalError,
-                       "Can't run 32-bit renderdevcmd to capture 32-bit program.");
+                       "Can't run 32-bit renderdoccmd to capture 32-bit program.");
 #else
       SET_ERROR_RESULT(
           result, ResultCode::InternalError,
-          "Can't run 32-bit renderdevcmd to capture 32-bit program."
-          "If this is a locally built RenderDev you must build both 32-bit and 64-bit versions.");
+          "Can't run 32-bit renderdoccmd to capture 32-bit program."
+          "If this is a locally built RenderDoc you must build both 32-bit and 64-bit versions.");
 #endif
       CloseHandle(hProcess);
       return {result, 0};
@@ -958,19 +1184,19 @@ rdcpair<RDResult, uint32_t> Process::InjectIntoProcess(uint32_t pid,
       return {result, 0};
     }
 
-    if(exitCode < RenderDev_FirstTargetControlPort)
+    if(exitCode < RenderDoc_FirstTargetControlPort)
     {
       ResultCode code = (ResultCode)exitCode;
 
       RDResult result;
-      SET_ERROR_RESULT(result, code, "32-bit renderdevcmd returned '%s'", ToStr(code).c_str());
+      SET_ERROR_RESULT(result, code, "32-bit renderdoccmd returned '%s'", ToStr(code).c_str());
       return {code, 0};
     }
 
     return {ResultCode::Succeeded, (uint32_t)exitCode};
   }
 
-  InjectDLL(hProcess, renderdevPath);
+  InjectDLL(hProcess, renderdocPath);
 
   const char *rdoc_dll = STRINGIZE(RDOC_BASE_NAME);
 
@@ -1148,7 +1374,7 @@ rdcpair<RDResult, uint32_t> Process::LaunchAndInjectIntoProcess(
     RDResult result;
     SET_ERROR_RESULT(
         result, ResultCode::InjectionFailed,
-        "For safety reasons RenderDev does not support capturing executables with a "
+        "For safety reasons RenderDoc does not support capturing executables with a "
         "reserved system filename such as '%s'. Please rename your executable to capture.",
         get_basename(app).c_str());
     return {result, 0};
@@ -1163,6 +1389,88 @@ rdcpair<RDResult, uint32_t> Process::LaunchAndInjectIntoProcess(
     return {result, 0};
   }
 
+#if ENABLED(RDOC_X64)
+  // Stealth injection path (x64 only): the process was created CREATE_SUSPENDED, so its main
+  // thread is parked before any of its code ran. Hijack that thread via SetThreadContext to
+  // LoadLibraryW our dll, then restore the original RIP. This avoids CreateRemoteThread,
+  // which is the API anti-injection solutions hook. On failure we report InjectionFailed
+  // directly rather than falling back, so the behaviour is predictable.
+  wchar_t renderdocPathW[MAX_PATH] = {0};
+  GetModuleFileNameW(GetModuleHandleA(STRINGIZE(RDOC_BASE_NAME) ".dll"), renderdocPathW,
+                     MAX_PATH - 1);
+  rdcwstr renderdocPath = renderdocPathW;
+
+  rdcpair<RDResult, uint32_t> result = {ResultCode::Succeeded, 0};
+
+  uintptr_t loc = InjectDLLViaThreadContext(pi.hProcess, pi.hThread, renderdocPath);
+
+  if(loc == 0)
+  {
+    // Injection failed - terminate the suspended process so we don't leak a half-injected
+    // process, and report the failure.
+    TerminateProcess(pi.hProcess, 1);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    SET_ERROR_RESULT(result.first, ResultCode::InjectionFailed,
+                     "Stealth injection via SetThreadContext failed for %s.dll.",
+                     STRINGIZE(RDOC_BASE_NAME));
+    return result;
+  }
+
+  // Now call the INTERNAL_* setup functions. The dll-loading step (the one anti-injection
+  // hooks usually catch) is already done via SetThreadContext above, and the main thread is
+  // left suspended at the process's real entry point (its original RIP was restored). These
+  // one-shot config calls still use InjectFunctionCall (which spawns a transient
+  // CreateRemoteThread), but they don't load any new module - they just configure the
+  // already-loaded renderdoc.dll. Replacing these with thread-context calls too is a future
+  // hardening step.
+  if(!capturefile.empty())
+    InjectFunctionCall(pi.hProcess, loc, "INTERNAL_SetCaptureFile", (void *)capturefile.c_str(),
+                       capturefile.size() + 1);
+
+  rdcstr debugLogfile = RDCGETLOGFILE();
+  InjectFunctionCall(pi.hProcess, loc, "INTERNAL_SetDebugLogFile", (void *)debugLogfile.c_str(),
+                     debugLogfile.size() + 1);
+  InjectFunctionCall(pi.hProcess, loc, "INTERNAL_SetCaptureOptions", (CaptureOptions *)&opts,
+                      sizeof(CaptureOptions));
+  InjectFunctionCall(pi.hProcess, loc, "INTERNAL_GetTargetControlIdent", &result.second,
+                      sizeof(result.second));
+
+  if(!env.empty())
+  {
+    for(const EnvironmentModification &e : env)
+    {
+      rdcstr name = e.name.trimmed();
+      rdcstr value = e.value;
+      EnvMod mod = e.mod;
+      EnvSep sep = e.sep;
+
+      if(name == "")
+        break;
+
+      InjectFunctionCall(pi.hProcess, loc, "INTERNAL_EnvModName", (void *)name.c_str(),
+                         name.size() + 1);
+      InjectFunctionCall(pi.hProcess, loc, "INTERNAL_EnvModValue", (void *)value.c_str(),
+                         value.size() + 1);
+      InjectFunctionCall(pi.hProcess, loc, "INTERNAL_EnvSep", &sep, sizeof(sep));
+      InjectFunctionCall(pi.hProcess, loc, "INTERNAL_EnvMod", &mod, sizeof(mod));
+    }
+
+    void *dummy = NULL;
+    InjectFunctionCall(pi.hProcess, loc, "INTERNAL_ApplyEnvMods", &dummy, sizeof(dummy));
+  }
+
+  ResumeThread(pi.hThread);
+
+  if(waitForExit)
+    WaitForSingleObject(pi.hProcess, INFINITE);
+
+  CloseHandle(pi.hThread);
+  CloseHandle(pi.hProcess);
+
+  return result;
+#else
+  // 32-bit: keep the existing CreateRemoteThread-based path (InjectIntoProcess).
   rdcpair<RDResult, uint32_t> ret = InjectIntoProcess(pi.dwProcessId, {}, capturefile, opts, false);
 
   CloseHandle(pi.hProcess);
@@ -1181,6 +1489,7 @@ rdcpair<RDResult, uint32_t> Process::LaunchAndInjectIntoProcess(
   CloseHandle(pi.hThread);
 
   return ret;
+#endif
 }
 
 bool Process::CanGlobalHook()
@@ -1221,7 +1530,7 @@ static RDResult HandleRegError(HKEY keyNative, HKEY keyWow32, LSTATUS ret, const
 
   RETURN_ERROR_RESULT(ResultCode::InjectionFailed,
                       "Error updating registry to enable global hook.\n"
-                      "Check that RenderDev is correctly running as administrator.");
+                      "Check that RenderDoc is correctly running as administrator.");
 }
 
 #define REG_CHECK(msg)                                    \
@@ -1247,8 +1556,8 @@ RDResult BackupAndChangeRegistry(GlobalHookData &hookdata, const rdcstr &shimpat
   {
     RETURN_ERROR_RESULT(
         ResultCode::FileIOFailed,
-        "RenderDev is installed on a volume or system that has short paths disabled.\n"
-        "For the global hook, short paths must be enabled where RenderDev is installed.");
+        "RenderDoc is installed on a volume or system that has short paths disabled.\n"
+        "For the global hook, short paths must be enabled where RenderDoc is installed.");
   }
 
   if(!shimpathWow32.empty())
@@ -1260,8 +1569,8 @@ RDResult BackupAndChangeRegistry(GlobalHookData &hookdata, const rdcstr &shimpat
     {
       RETURN_ERROR_RESULT(
           ResultCode::FileIOFailed,
-          "RenderDev is installed on a volume or system that has short paths disabled.\n"
-          "For the global hook, short paths must be enabled where RenderDev is installed.");
+          "RenderDoc is installed on a volume or system that has short paths disabled.\n"
+          "For the global hook, short paths must be enabled where RenderDoc is installed.");
     }
   }
 
@@ -1379,7 +1688,7 @@ RDResult BackupAndChangeRegistry(GlobalHookData &hookdata, const rdcstr &shimpat
   // write it to disk but don't fail if we can't, just print it to the log and keep going.
   wchar_t reg_backup[MAX_PATH];
   GetTempPathW(MAX_PATH, reg_backup);
-  wcscat_s(reg_backup, L"RenderDev_RestoreGlobalHook.reg");
+  wcscat_s(reg_backup, L"RenderDoc_RestoreGlobalHook.reg");
 
   FILE *f = NULL;
   _wfopen_s(&f, reg_backup, L"w");
@@ -1492,57 +1801,57 @@ RDResult Process::StartGlobalHook(const rdcstr &pathmatch, const rdcstr &capture
                         "Invalid global hook parameter, empty path to match");
   }
 
-  rdcstr renderdevPath;
-  FileIO::GetLibraryFilename(renderdevPath);
+  rdcstr renderdocPath;
+  FileIO::GetLibraryFilename(renderdocPath);
 
-  renderdevPath = get_dirname(renderdevPath);
+  renderdocPath = get_dirname(renderdocPath);
 
   // the native renderdevcmd.exe is always next to the dll. Wow32 will be somewhere else
-  rdcstr cmdpathNative = renderdevPath + "\\renderdevcmd.exe";
+  rdcstr cmdpathNative = renderdocPath + "\\renderdevcmd.exe";
   rdcstr cmdpathWow32;
 
-  rdcstr shimpathNative = renderdevPath;
+  rdcstr shimpathNative = renderdocPath;
   rdcstr shimpathWow32;
 
 #if ENABLED(RDOC_X64)
 
   // native shim is just renderdevshim64.dll
-  shimpathNative = renderdevPath + "\\renderdevshim64.dll";
+  shimpathNative = renderdocPath + "\\renderdevshim64.dll";
 
   // if it looks like we're in the development environment, look for the alternate bitness in the
   // corresponding folder
-  int devLocation = renderdevPath.find("\\x64\\Development");
+  int devLocation = renderdocPath.find("\\x64\\Development");
   if(devLocation >= 0)
   {
-    renderdevPath.erase(devLocation, ~0U);
+    renderdocPath.erase(devLocation, ~0U);
 
-    shimpathWow32 = renderdevPath + "\\Win32\\Development\\renderdevshim32.dll";
-    cmdpathWow32 = renderdevPath + "\\Win32\\Development\\renderdevcmd.exe";
+    shimpathWow32 = renderdocPath + "\\Win32\\Development\\renderdevshim32.dll";
+    cmdpathWow32 = renderdocPath + "\\Win32\\Development\\renderdevcmd.exe";
   }
   else
   {
-    devLocation = renderdevPath.find("\\x64\\Release");
+    devLocation = renderdocPath.find("\\x64\\Release");
 
     if(devLocation >= 0)
     {
-      renderdevPath.erase(devLocation, ~0U);
+      renderdocPath.erase(devLocation, ~0U);
 
-      shimpathWow32 = renderdevPath + "\\Win32\\Release\\renderdevshim32.dll";
-      cmdpathWow32 = renderdevPath + "\\Win32\\Release\\renderdevcmd.exe";
+      shimpathWow32 = renderdocPath + "\\Win32\\Release\\renderdevshim32.dll";
+      cmdpathWow32 = renderdocPath + "\\Win32\\Release\\renderdevcmd.exe";
     }
   }
 
   // if we're not in the dev environment, assume it's under a x86\ subfolder
   if(devLocation < 0)
   {
-    shimpathWow32 = renderdevPath + "\\x86\\renderdevshim32.dll";
-    cmdpathWow32 = renderdevPath + "\\x86\\renderdevcmd.exe";
+    shimpathWow32 = renderdocPath + "\\x86\\renderdevshim32.dll";
+    cmdpathWow32 = renderdocPath + "\\x86\\renderdevcmd.exe";
   }
 
 #else
 
   // nothing fancy to do here for 32-bit, just point the shim next to our dll.
-  shimpathNative = renderdevPath + "\\renderdevshim32.dll";
+  shimpathNative = renderdocPath + "\\renderdevshim32.dll";
 
 #endif
 
@@ -1630,7 +1939,7 @@ RDResult Process::StartGlobalHook(const rdcstr &pathmatch, const rdcstr &capture
   {
     CloseHandle(hookdata.dataNative.pipe);
     RestoreRegistry(hookdata);
-    RETURN_ERROR_RESULT(ResultCode::InternalError, "Can't launch renderdevcmd from '%s' (err %u)",
+    RETURN_ERROR_RESULT(ResultCode::InternalError, "Can't launch renderdoccmd from '%s' (err %u)",
                         cmdpathNative.c_str(), err);
   }
 
@@ -1639,7 +1948,7 @@ RDResult Process::StartGlobalHook(const rdcstr &pathmatch, const rdcstr &capture
 
   RDCEraseEl(pi);
 
-// repeat the process for the Wow32 renderdevcmd
+// repeat the process for the Wow32 renderdoccmd
 #if ENABLED(RDOC_X64)
   params = StringFormat::Fmt(
       "\"%s\" globalhook --match \"%s\" --capfile \"%s\" --debuglog \"%s\" --capopts \"%s\"",
@@ -1691,7 +2000,7 @@ RDResult Process::StartGlobalHook(const rdcstr &pathmatch, const rdcstr &capture
     CloseHandle(hookdata.dataNative.pipe);
     CloseHandle(hookdata.dataWow32.pipe);
     RestoreRegistry(hookdata);
-    RETURN_ERROR_RESULT(ResultCode::InternalError, "Can't launch renderdevcmd from '%s' (err %u)",
+    RETURN_ERROR_RESULT(ResultCode::InternalError, "Can't launch renderdoccmd from '%s' (err %u)",
                         cmdpathWow32.c_str(), err);
   }
 
