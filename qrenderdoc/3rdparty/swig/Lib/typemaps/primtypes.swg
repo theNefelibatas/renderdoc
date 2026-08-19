@@ -10,8 +10,6 @@
     bool
     signed char
     unsigned char
-    signed wchar_t     // in C++
-    unsigned wchar_t   // in C++
     short
     unsigned short
     int
@@ -105,7 +103,7 @@ SWIG_From_dec(bool)(bool value)
 SWIGINTERN int
 SWIG_AsVal_dec(bool)(SWIG_Object obj, bool *val)
 {
-  long v = 0;
+  long v;
   int res = SWIG_AsVal(long)(obj, val ? &v : 0);
   if (SWIG_IsOK(res)) {    
     if (val) *val = v ? true : false;
@@ -129,13 +127,6 @@ SWIG_AsVal_dec(bool)(SWIG_Object obj, bool *val)
 
 %numeric_slong(int,             "<limits.h>", INT_MIN, INT_MAX)
 %numeric_ulong(unsigned int,    "<limits.h>", UINT_MAX)
-
-/* signed/unsigned wchar_t */
-
-#ifdef __cplusplus
-%numeric_slong(signed wchar_t,   "<wchar.h>", WCHAR_MIN, WCHAR_MAX)
-%numeric_ulong(unsigned wchar_t, "<wchar.h>", UWCHAR_MAX)
-#endif
 
 /* float */
 
@@ -188,12 +179,12 @@ SWIG_AsVal_dec(size_t)(SWIG_Object obj, size_t *val)
 %#ifdef SWIG_LONG_LONG_AVAILABLE
   if (sizeof(size_t) <= sizeof(unsigned long)) {
 %#endif
-    unsigned long v = 0;
+    unsigned long v;
     res = SWIG_AsVal(unsigned long)(obj, val ? &v : 0);
     if (SWIG_IsOK(res) && val) *val = %numeric_cast(v, size_t);
 %#ifdef SWIG_LONG_LONG_AVAILABLE
   } else if (sizeof(size_t) <= sizeof(unsigned long long)) {
-    unsigned long long v = 0;
+    unsigned long long v;
     res = SWIG_AsVal(unsigned long long)(obj, val ? &v : 0);
     if (SWIG_IsOK(res) && val) *val = %numeric_cast(v, size_t);
   }
@@ -229,12 +220,12 @@ SWIG_AsVal_dec(ptrdiff_t)(SWIG_Object obj, ptrdiff_t *val)
 %#ifdef SWIG_LONG_LONG_AVAILABLE
   if (sizeof(ptrdiff_t) <= sizeof(long)) {
 %#endif
-    long v = 0;
+    long v;
     res = SWIG_AsVal(long)(obj, val ? &v : 0);
     if (SWIG_IsOK(res) && val) *val = %numeric_cast(v, ptrdiff_t);
 %#ifdef SWIG_LONG_LONG_AVAILABLE
   } else if (sizeof(ptrdiff_t) <= sizeof(long long)) {
-    long long v = 0;
+    long long v;
     res = SWIG_AsVal(long long)(obj, val ? &v : 0);
     if (SWIG_IsOK(res) && val) *val = %numeric_cast(v, ptrdiff_t);
   }
@@ -246,15 +237,18 @@ SWIG_AsVal_dec(ptrdiff_t)(SWIG_Object obj, ptrdiff_t *val)
 
 %fragment("SWIG_CanCastAsInteger","header",
 	  fragment=SWIG_AsVal_frag(double),
+	  fragment="<errno.h>",
 	  fragment="<float.h>",
 	  fragment="<math.h>") {
 SWIGINTERNINLINE int
 SWIG_CanCastAsInteger(double *d, double min, double max) {
   double x = *d;
   if ((min <= x && x <= max)) {
-   double fx = floor(x);
-   double cx = ceil(x);
-   double rd =  ((x - fx) < 0.5) ? fx : cx; /* simple rint */
+   double fx, cx, rd;
+   errno = 0;
+   fx = floor(x);
+   cx = ceil(x);
+   rd =  ((x - fx) < 0.5) ? fx : cx; /* simple rint */
    if ((errno == EDOM) || (errno == ERANGE)) {
      errno = 0;
    } else {
