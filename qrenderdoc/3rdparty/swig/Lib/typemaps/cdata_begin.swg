@@ -1,11 +1,12 @@
 /* -----------------------------------------------------------------------------
- * pointer.i
+ * cdata_begin.swg
+ *
+ * raw C data struct.
  * ----------------------------------------------------------------------------- */
 
-
-%echo "pointer.i is deprecated.  Use cpointer.i instead."
-%echo "See http://www.swig.org/Doc3.0/Library.html"
-
-
-
-
+%{
+typedef struct SWIGCDATA {
+  char *data;
+  size_t len;
+} SWIGCDATA;
+%}

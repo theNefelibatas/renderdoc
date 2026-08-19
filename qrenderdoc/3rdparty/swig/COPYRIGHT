@@ -1,7 +1,7 @@
 SWIG Copyright and Authors
 --------------------------
 
-Copyright (c) 1995-2011 The SWIG Developers
+Copyright (c) 1995-2023 The SWIG Developers
 Copyright (c) 2005-2006 Arizona Board of Regents (University of Arizona).
 Copyright (c) 1998-2005 University of Chicago.
 Copyright (c) 1995-1998 The University of Utah and the Regents of the University of California
@@ -14,11 +14,9 @@ Active SWIG Developers:
  William Fulton (wsf@fultondesigns.co.uk)                 (SWIG core, Java, C#, Windows, Cygwin)
  Olly Betts (olly@survex.com)                             (PHP)
  Joseph Wang (joequant@gmail.com)                         (R)
- Xavier Delacour (xavier.delacour@gmail.com)              (Octave)
- David Nadlinger (code@klickverbot.at)                    (D)
- Oliver Buchtala (oliver.buchtala@gmail.com)              (Javascript)
- Neha Narang (narangneha03@gmail.com)                     (Javascript)
+ Momtchil Momtchev (momtchil@momtchev.com)                (Javascript Node-API)
  Simon Marchetto (simon.marchetto@scilab-enterprises.com) (Scilab)
+ Zackery Spytz (zspytz@gmail.com)                         (OCaml, SWIG core)
 
 Past SWIG developers and major contributors include:
  Dave Beazley (dave-swig@dabeaz.com)                      (SWIG core, Python, Tcl, Perl)
@@ -28,7 +26,7 @@ Past SWIG developers and major contributors include:
  Mikel Bancroft (mikel@franz.com)                         (Allegro CL)
  Surendra Singhi (efuzzyone@netscape.net)                 (CLISP, CFFI)
  Marcelo Matus (mmatus@acms.arizona.edu)                  (SWIG core, Python, UTL[python,perl,tcl,ruby])
- Art Yerkes (ayerkes@speakeasy.net)                       (Ocaml)
+ Art Yerkes (ayerkes@speakeasy.net)                       (OCaml)
  Lyle Johnson (lyle@users.sourceforge.net)                (Ruby)
  Charlie Savage (cfis@interserv.com)                      (Ruby)
  Thien-Thi Nguyen (ttn@glug.org)                          (build/test/misc)
@@ -62,11 +60,17 @@ Past SWIG developers and major contributors include:
  John Lenz                                                (Guile, MzScheme updates, Chicken module, runtime system)
  Baozeng Ding  <sploving1@163.com>                        (Scilab)
  Ian Lance Taylor                                         (Go)
- Vadim Zeitlin                                            (PCRE, Python)
+ Dmitry Kabak (userdima@gmail.com)                        (Doxygen)
+ Vadim Zeitlin                                            (PCRE, Python, Doxygen)
  Stefan Zager (szager@gmail.com)                          (Python)
  Vincent Couvert                                          (Scilab)
  Sylvestre Ledru                                          (Scilab)
  Wolfgang Frisch                                          (Scilab)
+ Oliver Buchtala (oliver.buchtala@gmail.com)              (Javascript)
+ Neha Narang (narangneha03@gmail.com)                     (Javascript)
+ Xavier Delacour (xavier.delacour@gmail.com)              (Octave)
+ David Nadlinger (code@klickverbot.at)                    (D)
+ Leif Middelschulte (leif.middelschulte@gmail.com)        (C)
 
 Past contributors include:
  James Michael DuPont, Clark McGrew, Dustin Mitchell, Ian Cooke, Catalin Dumitrescu, Baran

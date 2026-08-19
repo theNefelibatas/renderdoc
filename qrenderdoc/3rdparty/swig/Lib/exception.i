@@ -12,17 +12,16 @@
 %insert("runtime") "swigerrors.swg"
 
 
-#ifdef SWIGPHP5
+#ifdef SWIGPHP
 %{
-#include "zend_exceptions.h"
-#define SWIG_exception(code, msg) do { zend_throw_exception(NULL, (char*)msg, code TSRMLS_CC); goto thrown; } while (0)
-%}
-#endif
-
-#ifdef SWIGPHP7
-%{
-#include "zend_exceptions.h"
-#define SWIG_exception(code, msg) do { zend_throw_exception(NULL, (char*)msg, code); goto thrown; } while (0)
+#define SWIG_exception(code, msg) do { zend_throw_exception( \
+    code == SWIG_TypeError ? zend_ce_type_error : \
+    code == SWIG_ValueError ? zend_ce_value_error : \
+    code == SWIG_DivisionByZero ? zend_ce_division_by_zero_error : \
+    code == SWIG_SyntaxError ? zend_ce_parse_error : \
+    code == SWIG_OverflowError ? zend_ce_arithmetic_error : \
+    code == SWIG_NullReferenceError ? zend_ce_type_error : \
+    NULL, msg, code); SWIG_fail; } while (0)
 %}
 #endif
 
@@ -31,24 +30,24 @@
   SWIGINTERN void SWIG_exception_ (int code, const char *msg,
                                const char *subr) {
 #define ERROR(scmerr)					\
-	scm_error(scm_from_locale_string((char *) (scmerr)),	\
-		  (char *) subr, (char *) msg,		\
-		  SCM_EOL, SCM_BOOL_F)
+	scm_error(scm_from_locale_string(scmerr),	\
+		  subr, msg, SCM_EOL, SCM_BOOL_F)
 #define MAP(swigerr, scmerr)			\
 	case swigerr:				\
 	  ERROR(scmerr);			\
 	  break
     switch (code) {
-      MAP(SWIG_MemoryError,	"swig-memory-error");
-      MAP(SWIG_IOError,		"swig-io-error");
-      MAP(SWIG_RuntimeError,	"swig-runtime-error");
-      MAP(SWIG_IndexError,	"swig-index-error");
-      MAP(SWIG_TypeError,	"swig-type-error");
-      MAP(SWIG_DivisionByZero,	"swig-division-by-zero");
-      MAP(SWIG_OverflowError,	"swig-overflow-error");
-      MAP(SWIG_SyntaxError,	"swig-syntax-error");
-      MAP(SWIG_ValueError,	"swig-value-error");
-      MAP(SWIG_SystemError,	"swig-system-error");
+      MAP(SWIG_MemoryError,	    "swig-memory-error");
+      MAP(SWIG_IOError,		    "swig-io-error");
+      MAP(SWIG_RuntimeError,	    "swig-runtime-error");
+      MAP(SWIG_IndexError,	    "swig-index-error");
+      MAP(SWIG_TypeError,	    "swig-type-error");
+      MAP(SWIG_DivisionByZero,	    "swig-division-by-zero");
+      MAP(SWIG_OverflowError,	    "swig-overflow-error");
+      MAP(SWIG_SyntaxError,	    "swig-syntax-error");
+      MAP(SWIG_ValueError,	    "swig-value-error");
+      MAP(SWIG_SystemError,	    "swig-system-error");
+      MAP(SWIG_NullReferenceError,  "swig-null-reference-error");
     default:
       ERROR("swig-error");
     }
@@ -57,38 +56,6 @@
   }
 
 #define SWIG_exception(a,b) SWIG_exception_(a, b, FUNC_NAME)
-%}
-#endif
-
-#ifdef SWIGMZSCHEME
-
-%{
-SWIGINTERN void SWIG_exception_ (int code, const char *msg) {
-#define ERROR(errname)				\
-	scheme_signal_error(errname " (%s)", msg);
-#define MAP(swigerr, errname)			\
-	case swigerr:				\
-	  ERROR(errname);			\
-	  break
-    switch (code) {
-      MAP(SWIG_MemoryError,	"swig-memory-error");
-      MAP(SWIG_IOError,		"swig-io-error");
-      MAP(SWIG_RuntimeError,	"swig-runtime-error");
-      MAP(SWIG_IndexError,	"swig-index-error");
-      MAP(SWIG_TypeError,	"swig-type-error");
-      MAP(SWIG_DivisionByZero,	"swig-division-by-zero");
-      MAP(SWIG_OverflowError,	"swig-overflow-error");
-      MAP(SWIG_SyntaxError,	"swig-syntax-error");
-      MAP(SWIG_ValueError,	"swig-value-error");
-      MAP(SWIG_SystemError,	"swig-system-error");
-    default:
-      ERROR("swig-error");
-    }
-#undef ERROR
-#undef MAP
-  }
-
-#define SWIG_exception(a,b) SWIG_exception_(a, b)
 %}
 #endif
 
@@ -119,6 +86,9 @@ SWIGINTERN void SWIG_JavaException(JNIEnv *jenv, int code, const char *msg) {
   case SWIG_TypeError:
     exception_code = SWIG_JavaIllegalArgumentException;
     break;
+  case SWIG_NullReferenceError:
+    exception_code = SWIG_JavaNullPointerException;
+    break;
   case SWIG_UnknownError:
   default:
     exception_code = SWIG_JavaUnknownError;
@@ -134,32 +104,50 @@ SWIGINTERN void SWIG_JavaException(JNIEnv *jenv, int code, const char *msg) {
 
 #ifdef SWIGOCAML
 %{
-#define OCAML_MSG_BUF_LEN 1024
-SWIGINTERN void SWIG_exception_(int code, const char *msg) {
-  char msg_buf[OCAML_MSG_BUF_LEN];
-  sprintf( msg_buf, "Exception(%d): %s\n", code, msg );
-  failwith( msg_buf );
+SWIGINTERN void SWIG_OCamlException(int code, const char *msg) {
+  CAMLparam0();
+
+  SWIG_OCamlExceptionCodes exception_code = SWIG_OCamlUnknownError;
+  switch (code) {
+  case SWIG_DivisionByZero:
+    exception_code = SWIG_OCamlArithmeticException;
+    break;
+  case SWIG_IndexError:
+    exception_code = SWIG_OCamlIndexOutOfBoundsException;
+    break;
+  case SWIG_IOError:
+  case SWIG_SystemError:
+    exception_code = SWIG_OCamlSystemException;
+    break;
+  case SWIG_MemoryError:
+    exception_code = SWIG_OCamlOutOfMemoryError;
+    break;
+  case SWIG_OverflowError:
+    exception_code = SWIG_OCamlOverflowException;
+    break;
+  case SWIG_RuntimeError:
+    exception_code = SWIG_OCamlRuntimeException;
+    break;
+  case SWIG_SyntaxError:
+  case SWIG_TypeError:
+  case SWIG_ValueError:
+    exception_code = SWIG_OCamlIllegalArgumentException;
+    break;
+  case SWIG_NullReferenceError:
+    exception_code = SWIG_OCamlNullReferenceException;
+    break;
+  case SWIG_UnknownError:
+  default:
+    exception_code = SWIG_OCamlUnknownError;
+    break;
+  }
+  SWIG_OCamlThrowException(exception_code, msg);
+  CAMLreturn0;
 }
-#define SWIG_exception(a,b) SWIG_exception_((a),(b))
+#define SWIG_exception(code, msg) SWIG_OCamlException(code, msg)
 %}
 #endif
 
-
-#ifdef SWIGCHICKEN
-%{
-SWIGINTERN void SWIG_exception_(int code, const char *msg) {
-  C_word *a;
-  C_word scmmsg;
-  C_word list;
-
-  a = C_alloc (C_SIZEOF_STRING (strlen (msg)) + C_SIZEOF_LIST(2));
-  scmmsg = C_string2 (&a, (char *) msg);
-  list = C_list(&a, 2, C_fix(code), scmmsg);
-  SWIG_ThrowException(list);
-}
-#define SWIG_exception(a,b) SWIG_exception_((a),(b))
-%}
-#endif
 
 #ifdef SWIGCSHARP
 %{
@@ -184,6 +172,9 @@ SWIGINTERN void SWIG_CSharpException(int code, const char *msg) {
       break;
     case SWIG_OverflowError:
       exception_code = SWIG_CSharpOverflowException;
+      break;
+    case SWIG_NullReferenceError:
+      exception_code = SWIG_CSharpNullReferenceException;
       break;
     case SWIG_RuntimeError:
     case SWIG_TypeError:
@@ -225,6 +216,9 @@ SWIGINTERN void SWIG_DThrowException(int code, const char *msg) {
     break;
   case SWIG_ValueError:
     exception_code = SWIG_DIllegalArgumentException;
+    break;
+  case SWIG_NullReferenceError:
+    exception_code = SWIG_DNullReferenceException;
     break;
   case SWIG_DivisionByZero:
   case SWIG_MemoryError:
