@@ -52,6 +52,11 @@ VA_IGNORE_REST_OF_FILE
 %}
 
 %{
+  // Qt defines slots/signals/foreach as macros which break SWIG-generated
+  // code (e.g. `PyType_Slot slots[]` declarations). Disable the keyword
+  // macros before including any Qt headers; QRDInterface.h and this module
+  // do not use the keyword syntax.
+  #define QT_NO_KEYWORDS
   #include "Code/Interface/QRDInterface.h"
 %}
 
@@ -59,6 +64,9 @@ VA_IGNORE_REST_OF_FILE
 
 // import the renderdoc interface that we depend on
 %import "renderdoc.i"
+
+// ignore warning about SFINAE template redefinitions (benign, SWIG 4.5.0+)
+#pragma SWIG nowarn=302
 
 TEMPLATE_ARRAY_DECLARE(rdcarray);
 TEMPLATE_FIXEDARRAY_DECLARE(rdcfixedarray);
@@ -161,10 +169,10 @@ SWIGPY_DESTRUCTOR_CLOSURE(capviewer_deinit) /* defines capviewer_deinit_destruct
 %rename("%(regex:/^I([A-Z].*)/\\1/)s", %$isclass) "";
 
 %{
-  #ifndef slots
-  #define slots
-  #endif
-
+  // No Code/Interface header uses Qt keyword syntax (slots:/signals:), so
+  // the empty `slots` macro once defined here is obsolete AND collides with
+  // SWIG 4.5.0-generated `PyType_Slot slots[]` declarations. Qt keyword
+  // macros are disabled via QT_NO_KEYWORDS before the Qt includes instead.
   DECLARE_STRINGISE_TYPE(rdcstrpair);
 %}
 

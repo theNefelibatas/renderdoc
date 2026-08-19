@@ -39,6 +39,9 @@ SWIG_Python_ErrorType(int code) {
   case SWIG_AttributeError:
     type = PyExc_AttributeError;
     break;
+  case SWIG_NullReferenceError:
+    type = PyExc_TypeError;
+    break;
   default:
     type = PyExc_RuntimeError;
   }
@@ -53,18 +56,53 @@ SWIG_Python_AddErrorMsg(const char* mesg)
   PyObject *value = 0;
   PyObject *traceback = 0;
 
-  if (PyErr_Occurred()) PyErr_Fetch(&type, &value, &traceback);
+  if (PyErr_Occurred())
+    PyErr_Fetch(&type, &value, &traceback);
   if (value) {
-    char *tmp;
     PyObject *old_str = PyObject_Str(value);
+    PyObject *bytes = NULL;
+    const char *tmp = SWIG_PyUnicode_AsUTF8AndSize(old_str, NULL, &bytes);
     PyErr_Clear();
-    Py_XINCREF(type);
-
-    PyErr_Format(type, "%s %s", tmp = SWIG_Python_str_AsChar(old_str), mesg);
-    SWIG_Python_str_DelForPy3(tmp);
-    Py_DECREF(old_str);
-    Py_DECREF(value);
+    SWIG_Py_XINCREF(type);
+    if (tmp)
+      PyErr_Format(type, "%s %s", tmp, mesg);
+    else
+      PyErr_Format(type, "%s", mesg);
+    SWIG_Py_XDECREF(bytes);
+    SWIG_Py_DECREF(old_str);
+    SWIG_Py_DECREF(value);
   } else {
     PyErr_SetString(PyExc_RuntimeError, mesg);
+  }
+}
+
+SWIGRUNTIME int
+SWIG_Python_TypeErrorOccurred(PyObject *obj)
+{
+  PyObject *error;
+  if (obj)
+    return 0;
+  error = PyErr_Occurred();
+  return error && PyErr_GivenExceptionMatches(error, PyExc_TypeError);
+}
+
+SWIGRUNTIME void
+SWIG_Python_RaiseOrModifyTypeError(const char *message)
+{
+  if (SWIG_Python_TypeErrorOccurred(NULL)) {
+    /* Use existing TypeError to preserve stacktrace and enhance with given message */
+    PyObject *newvalue;
+    PyObject *type = NULL, *value = NULL, *traceback = NULL;
+    PyErr_Fetch(&type, &value, &traceback);
+    newvalue = PyUnicode_FromFormat("%S\nAdditional information:\n%s", value, message);
+    if (newvalue) {
+      SWIG_Py_XDECREF(value);
+      PyErr_Restore(type, newvalue, traceback);
+    } else {
+      PyErr_Restore(type, value, traceback);
+    }
+  } else {
+    /* Raise TypeError using given message */
+    PyErr_SetString(PyExc_TypeError, message);
   }
 }

@@ -73,9 +73,9 @@
       <RuntimeTypeInfo>false</RuntimeTypeInfo>
       <TreatWarningAsError>true</TreatWarningAsError>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
-      <AdditionalOptions>/wd4100 /wd4512 /wd4127</AdditionalOptions>
+      <AdditionalOptions>/std:c++17 /wd4100 /wd4512 /wd4127</AdditionalOptions>
       <AdditionalIncludeDirectories>$(ProjectDir)..\..\;$(PythonIncludeDir);$(SolutionDir)\renderdoc\api\replay</AdditionalIncludeDirectories>
-      <DisableSpecificWarnings>4714;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <DisableSpecificWarnings>4127;4189;4456;4459;4701;4244;4706;4101;4714;%(DisableSpecificWarnings)</DisableSpecificWarnings>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -122,7 +122,7 @@
     <CustomBuild Include="qrenderdoc.i">
       <FileType>Document</FileType>
       <AdditionalInputs>%(Fullpath);$(SwigInterfaces);$(SwigHeaders);$(QRDHeaders);%(AdditionalInputs)</AdditionalInputs>
-      <Command>"$(ProjectDir)..\..\3rdparty\swig\swig.exe" -v -Wextra -Werror -O -interface %(Filename) -c++ -python -modern -modernargs -enumclass -fastunpack -py3 -builtin -I"$(ProjectDir)..\.." -I"$(SolutionDir)renderdoc\api\replay" -outdir "$(IntDir)generated" -o "$(IntDir)generated\%(Filename)_module_python.cxx" "%(FullPath)"</Command>
+      <Command>"$(ProjectDir)..\..\3rdparty\swig\swig.exe" -v -Wextra -Werror -O -interface %(Filename) -c++ -python -modern -modernargs -fastunpack -py3 -builtin -I"$(ProjectDir)..\.." -I"$(SolutionDir)renderdoc\api\replay" -outdir "$(IntDir)generated" -o "$(IntDir)generated\%(Filename)_module_python.cxx" "%(FullPath)"</Command>
       <Message>Compiling SWIG interface</Message>
       <Outputs>$(IntDir)generated\%(Filename).py;$(IntDir)generated\%(Filename)_module_python.cxx;%(Outputs)</Outputs>
       <LinkObjects>false</LinkObjects>
@@ -134,7 +134,7 @@
     <CustomBuild Include="renderdoc.i">
       <FileType>Document</FileType>
       <AdditionalInputs>%(Fullpath);$(SwigInterfaces);$(SwigHeaders);$(CoreReplayHeaders);%(AdditionalInputs)</AdditionalInputs>
-      <Command>"$(ProjectDir)..\..\3rdparty\swig\swig.exe" -v -Wextra -Werror -O -c++ -python -modern -modernargs -enumclass -fastunpack -py3 -builtin -I"$(SolutionDir)renderdoc\api\replay" -outdir "$(IntDir)generated" -o "$(IntDir)generated\%(Filename)_module_python.cxx" "%(FullPath)"</Command>
+      <Command>"$(ProjectDir)..\..\3rdparty\swig\swig.exe" -v -Wextra -Werror -O -c++ -python -modern -modernargs -fastunpack -py3 -builtin -I"$(SolutionDir)renderdoc\api\replay" -outdir "$(IntDir)generated" -o "$(IntDir)generated\%(Filename)_module_python.cxx" "%(FullPath)"</Command>
       <Message>Compiling SWIG interface</Message>
       <Outputs>$(IntDir)generated\%(Filename).py;$(IntDir)generated\%(Filename)_module_python.cxx;%(Outputs)</Outputs>
       <LinkObjects>false</LinkObjects>

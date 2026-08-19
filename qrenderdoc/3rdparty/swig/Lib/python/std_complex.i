@@ -8,6 +8,13 @@
 #include <complex> 
 %}
 
+namespace std {
+  %naturalvar complex;
+  template<typename T> class complex;
+  %template() complex<double>;
+  %template() complex<float>;
+}
+
 /* defining the complex as/from converters */
 
 %swig_cplxdbl_convn(std::complex<double>, std::complex<double>, std::real, std::imag)
@@ -18,5 +25,5 @@
 %typemaps_primitive(%checkcode(CPLXDBL), std::complex<double>);
 %typemaps_primitive(%checkcode(CPLXFLT), std::complex<float>);
 
-
-
+%typemap(pytyping) std::complex< float >,  std::complex< float >  const & "complex"
+%typemap(pytyping) std::complex< double >, std::complex< double > const & "complex"

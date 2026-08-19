@@ -1934,13 +1934,17 @@ PyLongWriter_Finish(PyLongWriter *writer)
 #  define Py_T_OBJECT_EX  16
 #  define Py_T_LONGLONG   17
 #  define Py_T_ULONGLONG  18
-#  define Py_T_PYSSIZET   19
+#  ifndef Py_T_PYSSIZET
+#    define Py_T_PYSSIZET   19
+#  endif
 
 #  if PY_VERSION_HEX >= 0x03000000 && !defined(PYPY_VERSION)
 #    define _Py_T_NONE      20
 #  endif
 
-#  define Py_READONLY            1
+#  ifndef Py_READONLY
+#    define Py_READONLY            1
+#  endif
 #  define Py_AUDIT_READ          2
 #  define _Py_WRITE_RESTRICTED   4
 #endif
