@@ -53,6 +53,9 @@ inline PyObject *PyWeakref_GetObject_emu(PyObject *ref)
 #pragma SWIG nowarn=401
 #pragma SWIG nowarn=315
 
+// ignore warning about SFINAE template redefinitions (benign, SWIG 4.5.0+)
+#pragma SWIG nowarn=302
+
 // ignore warning about redundant declaration of typedef (byte)
 #pragma SWIG nowarn=322
 

@@ -9,13 +9,15 @@
 // and we just return the int value.
 // If there's no tp_dict though, we can use the tp_base that points to the
 // python Enum class type object, instead of registering our actual type.
+// NOTE: under vanilla SWIG 4.x the enum descriptor's clientdata can be NULL,
+// so guard the dereference and fall back to the plain int return in that case.
 %typemap(out) enum SWIGTYPE {
   SwigPyClientData *cd = NULL;
   PyObject *enum_constructor = NULL;
   PyObject *numerical = SWIG_From_int(static_cast< int >(result));
 
   cd = (SwigPyClientData*)$&1_descriptor->clientdata;
-  if (cd->pytype->tp_dict) {
+  if (!cd || !cd->pytype || cd->pytype->tp_dict) {
     $result = numerical;
   } else {
     enum_constructor = (PyObject *)cd->pytype->tp_base;

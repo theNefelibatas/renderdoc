@@ -9,6 +9,10 @@
 #define %pythoncode  %insert("python")
 #define %pythonbegin %insert("pythonbegin")
 
+/* stub file code, only generated when the -pyi or -pyifile option is used */
+#define %pythonstubcode  %insert("pythonstub")
+#define %pythonstubbegin %insert("pythonstubbegin")
+
 
 /* ------------------------------------------------------------------------- */
 /* 
@@ -40,9 +44,6 @@ it will make all the wrapped classes nondynamic ones.
 The implementation is based on this recipe:
 
    http://aspn.activestate.com/ASPN/Cookbook/Python/Recipe/252158
-
-and works for modern (-modern) and plain python. We do not use __slots__, 
-so, it works with old python versions.
 
 */
 
@@ -163,7 +164,7 @@ These methods "may be called" if needed.
 
 /* ------------------------------------------------------------------------- */
 /*
-  Enable keywords paramaters
+  Enable keywords parameters
 */
 
 #define %kwargs      %feature("kwargs") 
